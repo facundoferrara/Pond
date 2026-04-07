@@ -1,0 +1,77 @@
+[gd_scene load_steps=6 format=3 uid="uid://pond_game_01"]
+
+[ext_resource type="Script" path="res://scripts/Game.gd"        id="1_game"]
+[ext_resource type="Script" path="res://scripts/Player.gd"      id="2_player"]
+[ext_resource type="Script" path="res://scripts/SpawnSystem.gd" id="3_spawn"]
+[ext_resource type="Script" path="res://scripts/UI.gd"          id="4_ui"]
+[ext_resource type="Script" path="res://scripts/PauseMenu.gd"   id="5_pause"]
+
+[node name="Game" type="Node2D"]
+script = ExtResource("1_game")
+
+[node name="Background" type="ColorRect" parent="."]
+offset_right  = 1280.0
+offset_bottom = 720.0
+color = Color(0.10, 0.22, 0.36, 1.0)
+
+[node name="PondArea" type="ColorRect" parent="."]
+offset_left   = 64.0
+offset_top    = 64.0
+offset_right  = 1216.0
+offset_bottom = 656.0
+color = Color(0.06, 0.18, 0.32, 1.0)
+
+[node name="P1SpawnLabel" type="Label" parent="."]
+offset_left   = 10.0
+offset_top    = 66.0
+offset_right  = 430.0
+offset_bottom = 86.0
+text     = "← P1 spawns here"
+modulate = Color(0.50, 0.75, 1.00, 0.80)
+
+[node name="P2SpawnLabel" type="Label" parent="."]
+offset_left   = 850.0
+offset_top    = 66.0
+offset_right  = 1270.0
+offset_bottom = 86.0
+text                 = "P2 spawns here →"
+horizontal_alignment = 2
+modulate = Color(1.00, 0.55, 0.45, 0.80)
+
+[node name="ScoringLabel" type="Label" parent="."]
+offset_left   = 400.0
+offset_top    = 660.0
+offset_right  = 880.0
+offset_bottom = 680.0
+text                 = "← Fish exit here and score points →"
+horizontal_alignment = 1
+modulate = Color(1.0, 1.0, 1.0, 0.45)
+
+[node name="Plants" type="Node2D" parent="."]
+
+[node name="FishContainer" type="Node2D" parent="."]
+
+[node name="Players" type="Node2D" parent="."]
+
+[node name="Player1" type="Node" parent="Players"]
+script    = ExtResource("2_player")
+player_id = 1
+device_id = 0
+
+[node name="Player2" type="Node" parent="Players"]
+script    = ExtResource("2_player")
+player_id = 2
+device_id = 1
+
+[node name="SpawnSystem" type="Node" parent="."]
+script      = ExtResource("3_spawn")
+p1_spawn_x  = 320.0
+p2_spawn_x  = 960.0
+spawn_y     = 90.0
+
+[node name="UI" type="CanvasLayer" parent="."]
+script = ExtResource("4_ui")
+
+[node name="PauseMenu" type="CanvasLayer" parent="."]
+script  = ExtResource("5_pause")
+visible = false
