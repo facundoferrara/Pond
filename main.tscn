@@ -1,3 +1,7 @@
-[gd_scene format=3 uid="uid://c0g8531p3vl3y"]
+[gd_scene load_steps=2 format=3 uid="uid://c0g8531p3vl3y"]
 
-[node name="Node2D" type="Node2D" unique_id=1137116237]
+[ext_resource type="PackedScene" uid="uid://b4t57ow634gmu" path="res://scenes/zoo.tscn" id="1_zoo"]
+
+[node name="Main" type="Node2D"]
+
+[node name="Zoo" parent="." instance=ExtResource("1_zoo")]

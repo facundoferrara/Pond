@@ -1,0 +1,15 @@
+[gd_scene format=3 uid="uid://ivcaltqqc8mn"]
+
+[ext_resource type="Texture2D" uid="uid://dg8npgclb5g3h" path="res://assets/dientudo.png" id="1_texture"]
+[ext_resource type="Script" uid="uid://c57rrqkjgmx1e" path="res://scripts/dientudo.gd" id="2_script"]
+
+[node name="Dientudo" type="Node2D" unique_id=1473782029]
+script = ExtResource("2_script")
+species = &"dientudo"
+is_predator = true
+vision_radius = 140.0
+separation_radius = 32.0
+visual_scale_multiplier = 7.0
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1246976143]
+texture = ExtResource("1_texture")

@@ -1,0 +1,13 @@
+[gd_scene format=3 uid="uid://cvhfidecpqwnf"]
+
+[ext_resource type="Texture2D" uid="uid://xkqw5fneq2ry" path="res://assets/sabalo.png" id="1_texture"]
+[ext_resource type="Script" uid="uid://63x5uleovey3" path="res://scripts/sabalo.gd" id="2_script"]
+
+[node name="Sabalo" type="Node2D" unique_id=2134667489]
+script = ExtResource("2_script")
+species = &"sabalo"
+separation_radius = 26.0
+visual_scale_multiplier = 8.0
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=274733233]
+texture = ExtResource("1_texture")

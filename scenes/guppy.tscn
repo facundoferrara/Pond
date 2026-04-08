@@ -1,0 +1,13 @@
+[gd_scene format=3 uid="uid://c4hpt2455ciqb"]
+
+[ext_resource type="Texture2D" uid="uid://c0hihiaglaby4" path="res://assets/mojarrita.png" id="1_texture"]
+[ext_resource type="Script" uid="uid://b844ffe0ynjns" path="res://scripts/guppy.gd" id="2_script"]
+
+[node name="Guppy" type="Node2D" unique_id=596746191]
+script = ExtResource("2_script")
+vision_radius = 80.0
+separation_radius = 20.0
+visual_scale_multiplier = 10.0
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1301981013]
+texture = ExtResource("1_texture")
