@@ -1,25 +1,41 @@
 extends Fish
 class_name Dientudo
 
+signal prey_predated(prey_position: Vector2, prey_weight_g: float)
+
 enum HuntState {
 	IDLE,
 	WINDING_UP,
 	DARTING
 }
 
+@export_group("Dientudo: Debug")
+## Draws predator/hunt gizmos in editor and runtime.
 @export var debug_gizmo_enabled: bool = false
+## Line thickness for debug gizmos.
 @export var gizmo_line_width: float = 1.5
 
 var hunt_state: HuntState = HuntState.IDLE
 var target_prey: Fish = null
 var starting_weight_original: float = 0.0
-var max_size_growth_ratio: float = 1.2
+@export_group("Dientudo: Hunt")
+## Maximum growth ratio before predator stops hunting.
+@export var max_size_growth_ratio: float = 1.2
+## Wind-up time before dart starts.
 @export var dart_wind_up_seconds: float = 0.5
+## Maximum dart duration.
 @export var dart_duration_seconds: float = 1.0
+## Cooldown after a dart attempt.
 @export var dart_cooldown_seconds: float = 5.0
+## Speed multiplier applied during dart.
 @export var dash_speed_multiplier: float = 3.0
+## Turn responsiveness factor while dashing.
 @export var dash_turn_rate_factor: float = 0.25
+## Edge-distance factor where dash gets aborted near boundary.
 @export var dash_abort_edge_distance_factor: float = 0.5
+
+@export_group("Dientudo: Digestion")
+## Digested mass per second after consuming prey.
 @export var digestion_speed_g_per_sec: float = 30.0
 var wind_up_timer: float = 0.0
 var dart_timer: float = 0.0
@@ -32,7 +48,12 @@ var at_max_size: bool = false
 func _ready() -> void:
 	species = SpeciesDB.DIENTUDO
 	super._ready()
-	var species_data: Dictionary = SpeciesDB.get_species(SpeciesDB.DIENTUDO)
+	starting_weight_original = weight
+
+
+func _apply_species_defaults() -> void:
+	super._apply_species_defaults()
+	var species_data: Dictionary = SpeciesDB.get_species(species)
 	max_size_growth_ratio = float(species_data.get("max_size_growth_ratio", max_size_growth_ratio))
 	dart_wind_up_seconds = float(species_data.get("dart_wind_up_seconds", dart_wind_up_seconds))
 	dart_duration_seconds = float(species_data.get("dart_duration_seconds", dart_duration_seconds))
@@ -40,7 +61,6 @@ func _ready() -> void:
 	dash_speed_multiplier = float(species_data.get("dash_speed_multiplier", dash_speed_multiplier))
 	dash_turn_rate_factor = float(species_data.get("dash_turn_rate_factor", dash_turn_rate_factor))
 	digestion_speed_g_per_sec = float(species_data.get("digestion_speed_g_per_sec", digestion_speed_g_per_sec))
-	starting_weight_original = weight
 
 
 func reinitialize() -> void:
@@ -224,10 +244,12 @@ func _consume_prey(prey: Fish) -> void:
 
 	var prey_weight: float = prey.weight
 	var prey_points: float = prey.points
+	var prey_position: Vector2 = prey.global_position
 	var absorbed_mass: float = prey_weight * 0.2
 	weight += absorbed_mass
 	points += prey_points * 0.5
 	digesting_mass_remaining_g += absorbed_mass
+	prey_predated.emit(prey_position, prey_weight)
 
 	prey.pending_remove = true
 	FishPool.release(prey)

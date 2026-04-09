@@ -1,12 +1,11 @@
 extends Node2D
 
+const SpeciesRegistry = preload("res://data/species_registry.gd")
+
 enum ScheduleMode {
 	ROUND_ROBIN,
 	FOCUSED_SUITE
 }
-
-const GUPPY_SCENE: PackedScene = preload("res://scenes/guppy.tscn")
-const SABALO_SCENE: PackedScene = preload("res://scenes/sabalo.tscn")
 
 @onready var pond: Node2D = $Pond
 @onready var pond_shape: Polygon2D = $PondShape
@@ -24,6 +23,9 @@ const SABALO_SCENE: PackedScene = preload("res://scenes/sabalo.tscn")
 @export var out_boundary_touch_distance: float = 10.0
 @export var out_boundary_avoid_distance: float = 140.0
 @export var despawn_areas_enabled: bool = true
+@export var startup_debris_count: int = 20
+@export var pellet_target_count: int = 40
+@export var pellet_spawn_interval_seconds: float = 0.35
 
 var pond_bounds: Rect2
 var out_boundary_polygon: PackedVector2Array = PackedVector2Array()
@@ -32,22 +34,8 @@ var score_by_player: Dictionary = {1: 0.0, 2: 0.0}
 var _despawn_polygon_cached: PackedVector2Array = PackedVector2Array()
 
 # --- Playtest HUD ---
-const _SPECIES_ORDER: Array[StringName] = [SpeciesDB.GUPPY, SpeciesDB.SABALO, SpeciesDB.DIENTUDO]
-const _SPECIES_DISPLAY_NAME: Dictionary = {
-	&"guppy": "Guppy",
-	&"sabalo": "Sabalo",
-	&"dientudo": "Dientudo"
-}
-const _SPECIES_COST_DISPLAY: Dictionary = {
-	&"guppy": 1,
-	&"sabalo": 4,
-	&"dientudo": 8
-}
-const _SPECIES_TEXTURES: Dictionary = {
-	&"guppy": preload("res://assets/mojarrita.png"),
-	&"sabalo": preload("res://assets/sabalo.png"),
-	&"dientudo": preload("res://assets/dientudo.png")
-}
+var _species_order: Array[StringName] = SpeciesRegistry.all_species()
+var _species_textures: Dictionary = {}
 const _SLOT_WIDTH: float = 264.0
 const _SLOT_HEIGHT: float = 58.0
 const _SLOT_GAP: float = 6.0
@@ -69,7 +57,7 @@ var _hud_diag_bg: Panel
 var _hud_diag_label: Label
 
 # --- Match state ---
-const WIN_MARGIN: float = 20.0
+const WIN_MARGIN: float = 50.0
 const _RESET_DELAY: float = 3.5
 const _AI_PROFILES: Array = [
 	{"name": "G", "weights": {&"guppy": 1.0}},
@@ -88,15 +76,20 @@ var _match_active: bool = true
 var _reset_timer: float = 0.0
 var _game_id: int = 0
 var _win_label: Label
-var _spawns_p1: Dictionary = {&"guppy": 0, &"sabalo": 0, &"dientudo": 0}
-var _spawns_p2: Dictionary = {&"guppy": 0, &"sabalo": 0, &"dientudo": 0}
+var _spawns_p1: Dictionary = {}
+var _spawns_p2: Dictionary = {}
 var _spawn_seq_p1: Array[StringName] = []
 var _spawn_seq_p2: Array[StringName] = []
 var _awaiting_mode_selection: bool = true
+var _pellet_spawn_timer: float = 0.0
 
 
 func _ready() -> void:
 	randomize()
+	_species_order = SpeciesRegistry.all_species()
+	_spawns_p1 = _zero_species_counter()
+	_spawns_p2 = _zero_species_counter()
+	_cache_species_textures()
 	pond_bounds = Rect2(Vector2.ZERO, get_viewport_rect().size)
 	_build_out_boundary_polygon()
 	_build_despawn_polygon_cache()
@@ -143,6 +136,7 @@ func _process(delta: float) -> void:
 		return
 	SpatialGrid.rebuild()
 	if _match_active:
+		_process_pellet_spawning(delta)
 		_handle_spawner(delta, spawner_p1)
 		_handle_spawner(delta, spawner_p2)
 		_process_despawn_areas()
@@ -167,8 +161,9 @@ func _handle_spawner(delta: float, spawner: Node2D) -> void:
 
 
 func _spawn_fish(fish_data: Dictionary) -> void:
-	var species_name: StringName = fish_data.get("species", SpeciesDB.GUPPY) as StringName
-	var fish: Fish = FishPool.acquire(species_name)
+	var species_name: StringName = fish_data.get("species", SpeciesRegistry.DEFAULT_SPECIES) as StringName
+	var normalized_species: StringName = SpeciesRegistry.normalize_species(species_name)
+	var fish: Fish = FishPool.acquire(normalized_species)
 	if fish == null:
 		return
 
@@ -178,73 +173,32 @@ func _spawn_fish(fish_data: Dictionary) -> void:
 	fish.set_process(true)
 	fish.position = fish_data.get("origin", Vector2.ZERO) as Vector2
 	var avoid_distance: float = out_boundary_avoid_distance
-	if species_name == SpeciesDB.SABALO:
+	if normalized_species == SpeciesDB.SABALO:
 		avoid_distance *= 0.5
-	var species_data: Dictionary = SpeciesDB.get_species(species_name)
-	var spawn_weight_min_g: float = float(species_data.get("spawn_weight_min_g", fish.weight))
-	var spawn_weight_max_g: float = float(species_data.get("spawn_weight_max_g", fish.weight))
-	if spawn_weight_max_g < spawn_weight_min_g:
-		var tmp: float = spawn_weight_min_g
-		spawn_weight_min_g = spawn_weight_max_g
-		spawn_weight_max_g = tmp
+	var spawn_weight_range: Vector2 = SpeciesRegistry.get_spawn_weight_range(normalized_species, fish.weight)
 	fish.configure_from_zoo(
-		species_name,
+		normalized_species,
 		player_id,
 		_pick_player_tint(player_id),
 		pond_bounds
 	)
-	fish.set_weight_grams(randf_range(spawn_weight_min_g, spawn_weight_max_g))
+	fish.set_weight_grams(randf_range(spawn_weight_range.x, spawn_weight_range.y))
 	fish.reinitialize()
 	fish.configure_out_boundary(out_boundary_polygon, out_boundary_touch_distance, avoid_distance)
 	fish.configure_despawn_area(_compute_despawn_center())
 	fish.set_source_spawner(fish_data.get("spawner_path", NodePath()) as NodePath)
 	fish.fish_exited.connect(_on_fish_exited)
+	if fish is Dientudo:
+		var predator: Dientudo = fish as Dientudo
+		if not predator.prey_predated.is_connected(_on_prey_predated):
+			predator.prey_predated.connect(_on_prey_predated)
 	SpatialGrid.register_fish(fish)
 	if player_id == 1:
-		_spawns_p1[species_name] = int(_spawns_p1.get(species_name, 0)) + 1
-		_spawn_seq_p1.append(species_name)
+		_spawns_p1[normalized_species] = int(_spawns_p1.get(normalized_species, 0)) + 1
+		_spawn_seq_p1.append(normalized_species)
 	else:
-		_spawns_p2[species_name] = int(_spawns_p2.get(species_name, 0)) + 1
-		_spawn_seq_p2.append(species_name)
-
-
-func _spawn_startup_debug_dientudo() -> void:
-	var fish: Fish = FishPool.acquire(SpeciesDB.DIENTUDO)
-	if fish == null:
-		return
-
-	fish.reparent(pond)
-	fish.show()
-	fish.set_process(true)
-	fish.position = pond_bounds.get_center() + Vector2(0.0, -90.0)
-
-	var species_data: Dictionary = SpeciesDB.get_species(SpeciesDB.DIENTUDO)
-	var spawn_weight_min_g: float = float(species_data.get("spawn_weight_min_g", fish.weight))
-	var spawn_weight_max_g: float = float(species_data.get("spawn_weight_max_g", fish.weight))
-	if spawn_weight_max_g < spawn_weight_min_g:
-		var tmp: float = spawn_weight_min_g
-		spawn_weight_min_g = spawn_weight_max_g
-		spawn_weight_max_g = tmp
-
-	fish.configure_from_zoo(SpeciesDB.DIENTUDO, 1, Color(1.0, 0.96, 0.86, 1.0), pond_bounds)
-	fish.set_weight_grams(randf_range(spawn_weight_min_g, spawn_weight_max_g))
-	fish.reinitialize()
-	fish.configure_out_boundary(out_boundary_polygon, out_boundary_touch_distance, out_boundary_avoid_distance)
-	fish.configure_despawn_area(_compute_despawn_center())
-	fish.set_source_spawner(NodePath())
-	fish.age_speed_multiplier = 0.0
-	fish.debug_facing = true
-	if fish is Dientudo:
-		var dientudo: Dientudo = fish as Dientudo
-		dientudo.debug_gizmo_enabled = true
-	fish.fish_exited.connect(_on_fish_exited)
-	SpatialGrid.register_fish(fish)
-
-
-func _scene_for_species(species_name: StringName) -> PackedScene:
-	if species_name == SpeciesDB.SABALO:
-		return SABALO_SCENE
-	return GUPPY_SCENE
+		_spawns_p2[normalized_species] = int(_spawns_p2.get(normalized_species, 0)) + 1
+		_spawn_seq_p2.append(normalized_species)
 
 
 func _compute_despawn_center() -> Vector2:
@@ -254,6 +208,118 @@ func _compute_despawn_center() -> Vector2:
 	for local_point: Vector2 in despawn_area.polygon:
 		accum += despawn_area.to_global(local_point)
 	return accum / float(despawn_area.polygon.size())
+
+
+func _spawn_debris(position: Vector2, value_points: int) -> void:
+	if value_points <= 0:
+		return
+	var debris_fish: Fish = FishPool.acquire(SpeciesRegistry.DEBRIS)
+	if debris_fish == null:
+		return
+
+	debris_fish.reparent(pond)
+	debris_fish.show()
+	debris_fish.set_process(true)
+	debris_fish.position = position
+	debris_fish.configure_from_zoo(SpeciesRegistry.DEBRIS, 1, Color(0.45, 0.30, 0.14, 1.0), pond_bounds)
+	debris_fish.reinitialize()
+	debris_fish.configure_out_boundary(out_boundary_polygon, out_boundary_touch_distance, out_boundary_avoid_distance)
+	debris_fish.configure_despawn_area(_compute_despawn_center())
+	debris_fish.set_source_spawner(NodePath())
+	if debris_fish is Debris:
+		(debris_fish as Debris).set_value_points(value_points)
+	SpatialGrid.register_fish(debris_fish)
+
+
+func _spawn_pellet(position: Vector2) -> void:
+	var pellet: Fish = FishPool.acquire(SpeciesRegistry.PELLET)
+	if pellet == null:
+		return
+
+	pellet.reparent(pond)
+	pellet.show()
+	pellet.set_process(true)
+	pellet.position = position
+	pellet.configure_from_zoo(SpeciesRegistry.PELLET, 1, Color(1.0, 1.0, 1.0, 1.0), pond_bounds)
+	pellet.reinitialize()
+	pellet.configure_out_boundary(out_boundary_polygon, out_boundary_touch_distance, out_boundary_avoid_distance)
+	pellet.configure_despawn_area(_compute_despawn_center())
+	pellet.set_source_spawner(NodePath())
+	SpatialGrid.register_fish(pellet)
+
+
+func _seed_startup_pellets() -> void:
+	for _i: int in range(maxi(pellet_target_count, 0)):
+		_spawn_pellet(_random_point_in_pond())
+
+
+func _process_pellet_spawning(delta: float) -> void:
+	if pellet_target_count <= 0:
+		return
+	_pellet_spawn_timer -= delta
+	if _pellet_spawn_timer > 0.0:
+		return
+
+	var live_pellets: int = 0
+	for child: Node in pond.get_children():
+		if not (child is Fish):
+			continue
+		var fish: Fish = child as Fish
+		if fish.species == SpeciesRegistry.PELLET and not fish.pending_remove:
+			live_pellets += 1
+
+	if live_pellets < pellet_target_count:
+		_spawn_pellet(_random_point_in_pond())
+		_pellet_spawn_timer = maxf(pellet_spawn_interval_seconds, 0.02)
+	else:
+		_pellet_spawn_timer = 0.25
+
+
+func _seed_startup_debris() -> void:
+	for _i: int in range(maxi(startup_debris_count, 0)):
+		_spawn_debris(_random_point_in_pond(), 1)
+
+
+func _random_point_in_pond() -> Vector2:
+	if out_boundary_polygon.size() < 3:
+		return Vector2(
+			randf_range(pond_bounds.position.x, pond_bounds.end.x),
+			randf_range(pond_bounds.position.y, pond_bounds.end.y)
+		)
+
+	var min_x: float = INF
+	var max_x: float = - INF
+	var min_y: float = INF
+	var max_y: float = - INF
+	for point: Vector2 in out_boundary_polygon:
+		min_x = minf(min_x, point.x)
+		max_x = maxf(max_x, point.x)
+		min_y = minf(min_y, point.y)
+		max_y = maxf(max_y, point.y)
+
+	for _attempt: int in range(48):
+		var candidate: Vector2 = Vector2(randf_range(min_x, max_x), randf_range(min_y, max_y))
+		if Geometry2D.is_point_in_polygon(candidate, out_boundary_polygon):
+			return candidate
+
+	return out_boundary_polygon[randi() % out_boundary_polygon.size()]
+
+
+func _on_prey_predated(prey_position: Vector2, prey_weight_g: float) -> void:
+	var debris_value: int = _roll_predation_debris_value(prey_weight_g)
+	if debris_value > 0:
+		_spawn_debris(prey_position, debris_value)
+
+
+func _roll_predation_debris_value(prey_weight_g: float) -> int:
+	var roll_count: int = int(floor(prey_weight_g / 50.0))
+	if roll_count <= 0:
+		return 0
+	var value_points: int = 0
+	for _i: int in range(roll_count):
+		if randf() <= 0.20:
+			value_points += 1
+	return value_points
 
 
 func _build_out_boundary_polygon() -> void:
@@ -307,6 +373,8 @@ func _pick_player_tint(player_id: int) -> Color:
 
 
 func _on_fish_exited(player_id: int, fish_points: float) -> void:
+	if player_id != 1 and player_id != 2:
+		return
 	score_by_player[player_id] = float(score_by_player.get(player_id, 0.0)) + fish_points
 
 
@@ -331,28 +399,21 @@ func _process_despawn_areas() -> void:
 func _despawn_and_tally(fish: Fish) -> void:
 	if fish.pending_remove:
 		return
+	if fish.species == SpeciesRegistry.DEBRIS:
+		FishPool.release(fish)
+		return
 
 	score_by_player[fish.player] = float(score_by_player.get(fish.player, 0.0)) + fish.points
 	FishPool.release(fish)
-
-
-func _point_in_polygon_node(point_global: Vector2, poly_node: Polygon2D) -> bool:
-	if poly_node == null:
-		return false
-	if poly_node.polygon.size() < 3:
-		return false
-
-	var global_poly: PackedVector2Array = PackedVector2Array()
-	for local_point: Vector2 in poly_node.polygon:
-		global_poly.append(poly_node.to_global(local_point))
-
-	return Geometry2D.is_point_in_polygon(point_global, global_poly)
 
 
 func _live_fish_count() -> int:
 	var total: int = 0
 	for child: Node in pond.get_children():
 		if child is Fish:
+			var fish: Fish = child as Fish
+			if fish.species == SpeciesRegistry.DEBRIS:
+				continue
 			total += 1
 	return total
 
@@ -364,6 +425,8 @@ func _live_fish_count_from_spawner(spawner: Node2D) -> int:
 		if not (child is Fish):
 			continue
 		var fish: Fish = child as Fish
+		if fish.species == SpeciesRegistry.DEBRIS:
+			continue
 		if fish.source_spawner == spawner_path:
 			total += 1
 	return total
@@ -469,9 +532,35 @@ func _make_res_label(pos: Vector2, align: HorizontalAlignment) -> Label:
 	return lbl
 
 
+func _cache_species_textures() -> void:
+	_species_textures.clear()
+	for species_name: StringName in _species_order:
+		var species_data: Dictionary = SpeciesRegistry.get_species_data(species_name)
+		var texture_path: String = String(species_data.get("texture_path", ""))
+		if texture_path == "":
+			continue
+		var texture: Texture2D = load(texture_path) as Texture2D
+		if texture != null:
+			_species_textures[species_name] = texture
+
+
+func _zero_species_counter() -> Dictionary:
+	var counters: Dictionary = {}
+	for species_name: StringName in _species_order:
+		counters[species_name] = 0
+	return counters
+
+
+func _sum_species_values(values: Dictionary) -> float:
+	var total: float = 0.0
+	for species_name: StringName in _species_order:
+		total += float(values.get(species_name, 0.0))
+	return total
+
+
 func _setup_player_hud(cl: CanvasLayer, base: Vector2, slots: Dictionary, styles: Dictionary, count_labels: Dictionary, right_aligned: bool) -> void:
-	for i: int in _SPECIES_ORDER.size():
-		var species: StringName = _SPECIES_ORDER[i]
+	for i: int in _species_order.size():
+		var species: StringName = _species_order[i]
 		var panel: Panel = Panel.new()
 		panel.position = base + Vector2(0.0, float(i) * (_SLOT_HEIGHT + _SLOT_GAP))
 		panel.size = Vector2(_SLOT_WIDTH, _SLOT_HEIGHT)
@@ -497,10 +586,10 @@ func _setup_player_hud(cl: CanvasLayer, base: Vector2, slots: Dictionary, styles
 		icon.custom_minimum_size = Vector2(42.0, 42.0)
 		icon.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
 		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		icon.texture = _SPECIES_TEXTURES.get(species, null) as Texture2D
+		icon.texture = _species_textures.get(species, null) as Texture2D
 
 		var name_lbl: Label = Label.new()
-		name_lbl.text = "%s (%d)" % [_SPECIES_DISPLAY_NAME[species], _SPECIES_COST_DISPLAY[species]]
+		name_lbl.text = "%s (%d)" % [SpeciesRegistry.get_display_name(species), SpeciesRegistry.get_spawn_cost(species)]
 		name_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		name_lbl.add_theme_color_override("font_color", Color.WHITE)
 		name_lbl.add_theme_constant_override("outline_size", 2)
@@ -544,7 +633,7 @@ func _update_hud() -> void:
 	_hud_res_p2.text = "%s | RES %d/%d" % [_p2_ai_name, int(res2), int(FishSpawner.RESOURCE_MAX)]
 	var sel1: StringName = spawner_p1.get("selected_species") as StringName
 	var sel2: StringName = spawner_p2.get("selected_species") as StringName
-	for species: StringName in _SPECIES_ORDER:
+	for species: StringName in _species_order:
 		if _hud_styles_p1.has(species):
 			(_hud_styles_p1[species] as StyleBoxFlat).border_color = _COL_SELECTED if species == sel1 else _COL_UNSELECTED
 		if _hud_styles_p2.has(species):
@@ -566,10 +655,10 @@ func _update_hud() -> void:
 		_hud_diag_label.text = "Systems: %s | Lead %+d | Sel P1 %s / P2 %s\nSpent P1 %.0f / P2 %.0f | Sched %d/%d" % [
 			match_state,
 			lead,
-			_SPECIES_DISPLAY_NAME.get(sel1, "?"),
-			_SPECIES_DISPLAY_NAME.get(sel2, "?"),
-			float(spent_p1.get(&"guppy", 0.0)) + float(spent_p1.get(&"sabalo", 0.0)) + float(spent_p1.get(&"dientudo", 0.0)),
-			float(spent_p2.get(&"guppy", 0.0)) + float(spent_p2.get(&"sabalo", 0.0)) + float(spent_p2.get(&"dientudo", 0.0)),
+			SpeciesRegistry.get_display_name(sel1),
+			SpeciesRegistry.get_display_name(sel2),
+			_sum_species_values(spent_p1),
+			_sum_species_values(spent_p2),
 			_schedule_index + 1,
 			_schedule.size()
 		]
@@ -601,10 +690,11 @@ func _do_reset() -> void:
 		if child is Fish:
 			FishPool.release(child as Fish)
 	score_by_player = {1: 0.0, 2: 0.0}
-	_spawns_p1 = {&"guppy": 0, &"sabalo": 0, &"dientudo": 0}
-	_spawns_p2 = {&"guppy": 0, &"sabalo": 0, &"dientudo": 0}
+	_spawns_p1 = _zero_species_counter()
+	_spawns_p2 = _zero_species_counter()
 	_spawn_seq_p1.clear()
 	_spawn_seq_p2.clear()
+	_pellet_spawn_timer = 0.0
 	if spawner_p1 != null and spawner_p1.has_method("reset"):
 		spawner_p1.call("reset")
 	if spawner_p2 != null and spawner_p2.has_method("reset"):
@@ -693,10 +783,10 @@ func _build_focused_suite_schedule() -> void:
 			_schedule.append({"lap": lap, "p1": int(pairing["p1"]), "p2": int(pairing["p2"])})
 
 
-func _find_ai_profile_index(name: String) -> int:
+func _find_ai_profile_index(profile_name: String) -> int:
 	for i: int in range(_AI_PROFILES.size()):
 		var profile: Dictionary = _AI_PROFILES[i] as Dictionary
-		if String(profile.get("name", "")) == name:
+		if String(profile.get("name", "")) == profile_name:
 			return i
 	return -1
 
@@ -724,3 +814,5 @@ func _start_match() -> void:
 	if spawner_p2 != null and spawner_p2.has_method("configure_strategy"):
 		spawner_p2.call("configure_strategy", _p2_ai_name, p2_profile["weights"])
 	_match_active = true
+	_seed_startup_pellets()
+	_seed_startup_debris()

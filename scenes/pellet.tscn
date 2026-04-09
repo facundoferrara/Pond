@@ -1,0 +1,40 @@
+[gd_scene format=3 uid="uid://fdegitfkix2y"]
+
+[ext_resource type="Texture2D" uid="uid://c1cgg4q5l4vya" path="res://assets/pellet.png" id="1_texture"]
+[ext_resource type="Script" uid="uid://brxnhopdf0k8w" path="res://scripts/pellet.gd" id="2_script"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_3j7el"]
+
+[node name="Pellet" type="Node2D" unique_id=1511599214]
+script = ExtResource("2_script")
+species = &"pellet"
+starting_energy = 100.0
+energy = 100.0
+weight = 3.0
+spawn_weight_min_g = 3.0
+spawn_weight_max_g = 3.0
+base_points = 0.0
+points = 0.0
+top_speed = 24.0
+vision_radius = 56.0
+predator_detection_radius = 0.0
+separation_radius = 18.0
+max_force = 70.0
+life_span_seconds = 9999.0
+hunger_rate = 0.0
+eat_radius = 0.0
+visual_scale_multiplier = 0.7
+scale_reference_weight_g = 3.0
+boid_weights = {
+"alignment": 0.2,
+"cohesion": 0.0,
+"separation": 0.2
+}
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1064355179]
+texture = ExtResource("1_texture")
+
+[node name="body" type="Area2D" parent="." unique_id=1386924781]
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="body" unique_id=1139825037]
+shape = SubResource("CircleShape2D_3j7el")

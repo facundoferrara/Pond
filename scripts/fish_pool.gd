@@ -1,22 +1,20 @@
 extends Node
 
+const SpeciesRegistry = preload("res://data/species_registry.gd")
+
 ## Dynamic, growing object pool for Fish nodes.
 ## Pre-warms a baseline count at startup to avoid first-spawn hitches.
 ## When the free list is exhausted, allocates a new instance and keeps it permanently.
 ## Population is never hard-capped; the ceiling is determined by gameplay parameters.
 
-const GUPPY_SCENE: PackedScene = preload("res://scenes/guppy.tscn")
-const SABALO_SCENE: PackedScene = preload("res://scenes/sabalo.tscn")
-const DIENTUDO_SCENE: PackedScene = preload("res://scenes/dientudo.tscn")
-
 ## Fish instantiated at startup per type to avoid cold-start hitch.
 @export var pre_warm_guppy_count: int = 20
 @export var pre_warm_sabalo_count: int = 10
 @export var pre_warm_dientudo_count: int = 5
+@export var pre_warm_pellet_count: int = 50
+@export var pre_warm_debris_count: int = 20
 
-var _free_guppies: Array[Fish] = []
-var _free_sabalos: Array[Fish] = []
-var _free_dientudos: Array[Fish] = []
+var _free_by_species: Dictionary = {}
 
 ## Hidden container keeps pooled nodes in the tree so they retain script state.
 var _pool_container: Node
@@ -26,9 +24,9 @@ func _ready() -> void:
 	_pool_container = Node.new()
 	_pool_container.name = "FishPoolContainer"
 	add_child(_pool_container)
-	_prewarm(GUPPY_SCENE, pre_warm_guppy_count, _free_guppies)
-	_prewarm(SABALO_SCENE, pre_warm_sabalo_count, _free_sabalos)
-	_prewarm(DIENTUDO_SCENE, pre_warm_dientudo_count, _free_dientudos)
+	for species_name: StringName in SpeciesRegistry.all_pooled_species():
+		_get_pool(species_name)
+		_prewarm(SpeciesRegistry.get_scene(species_name), _prewarm_count(species_name), _get_pool(species_name))
 
 
 func _prewarm(scene: PackedScene, count: int, pool: Array[Fish]) -> void:
@@ -43,11 +41,8 @@ func _prewarm(scene: PackedScene, count: int, pool: Array[Fish]) -> void:
 ## Returns a fish for the given species, reusing a pooled one if available.
 ## The returned fish is still parented to the pool container — caller must reparent.
 func acquire(species_name: StringName) -> Fish:
-	if species_name == SpeciesDB.SABALO:
-		return _acquire(SABALO_SCENE, _free_sabalos)
-	if species_name == SpeciesDB.DIENTUDO:
-		return _acquire(DIENTUDO_SCENE, _free_dientudos)
-	return _acquire(GUPPY_SCENE, _free_guppies)
+	var normalized_species: StringName = SpeciesRegistry.normalize_species(species_name)
+	return _acquire(SpeciesRegistry.get_scene(normalized_species), _get_pool(normalized_species))
 
 
 func _acquire(scene: PackedScene, pool: Array[Fish]) -> Fish:
@@ -76,10 +71,28 @@ func release(fish: Fish) -> void:
 	fish.pending_remove = true
 	fish.reparent(_pool_container)
 	fish.hide()
+	_get_pool(SpeciesRegistry.normalize_species(fish.species)).append(fish)
 
-	if fish.species == SpeciesDB.SABALO:
-		_free_sabalos.append(fish)
-	elif fish.species == SpeciesDB.DIENTUDO:
-		_free_dientudos.append(fish)
-	else:
-		_free_guppies.append(fish)
+
+func _prewarm_count(species_name: StringName) -> int:
+	match SpeciesRegistry.normalize_species(species_name):
+		SpeciesRegistry.GUPPY:
+			return pre_warm_guppy_count
+		SpeciesRegistry.SABALO:
+			return pre_warm_sabalo_count
+		SpeciesRegistry.DIENTUDO:
+			return pre_warm_dientudo_count
+		SpeciesRegistry.PELLET:
+			return pre_warm_pellet_count
+		SpeciesRegistry.DEBRIS:
+			return pre_warm_debris_count
+	return 0
+
+
+func _get_pool(species_name: StringName) -> Array[Fish]:
+	var normalized_species: StringName = SpeciesRegistry.normalize_species(species_name)
+	if not _free_by_species.has(normalized_species):
+		var new_pool: Array[Fish] = []
+		_free_by_species[normalized_species] = new_pool
+	var pool: Array[Fish] = _free_by_species[normalized_species]
+	return pool

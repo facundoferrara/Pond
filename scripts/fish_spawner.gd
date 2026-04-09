@@ -1,6 +1,8 @@
 extends Node2D
 class_name FishSpawner
 
+const SpeciesRegistry = preload("res://data/species_registry.gd")
+
 @export_range(1, 2) var player_id: int = 1
 @export var spawn_jitter_radius: float = 30.0
 @export var repel_radius: float = 340.0
@@ -13,36 +15,25 @@ const INDIVIDUAL_COOLDOWN: float = 0.5 ## Seconds after spawning sabalo/dientudo
 
 ## Resource cost to spawn one fish of each species.
 static func species_cost(species: StringName) -> int:
-	match species:
-		SpeciesDB.GUPPY: return 1
-		SpeciesDB.SABALO: return 4
-		SpeciesDB.DIENTUDO: return 8
-	return 1
+	return SpeciesRegistry.get_spawn_cost(species)
 
 var resources: float = 0.0
-var selected_species: StringName = SpeciesDB.GUPPY
+var selected_species: StringName = SpeciesRegistry.DEFAULT_SPECIES
 
-var _queued_species: StringName = SpeciesDB.GUPPY
+var _queued_species: StringName = SpeciesRegistry.DEFAULT_SPECIES
 var _spawn_ready: bool = false
 var _cooldown: float = 0.0
 var strategy: Dictionary = {}
 var strategy_name: String = "random"
-var resources_spent_by_species: Dictionary = {
-	SpeciesDB.GUPPY: 0.0,
-	SpeciesDB.SABALO: 0.0,
-	SpeciesDB.DIENTUDO: 0.0
-}
-var spawns_by_species: Dictionary = {
-	SpeciesDB.GUPPY: 0,
-	SpeciesDB.SABALO: 0,
-	SpeciesDB.DIENTUDO: 0
-}
+var resources_spent_by_species: Dictionary = {}
+var spawns_by_species: Dictionary = {}
 
 signal species_changed(pid: int, species: StringName)
 
 
 func _ready() -> void:
 	add_to_group("fish_spawners")
+	_initialize_species_tracking()
 
 
 func advance(delta: float) -> void:
@@ -60,7 +51,7 @@ func _try_queue_spawn() -> void:
 	resources_spent_by_species[selected_species] = float(resources_spent_by_species.get(selected_species, 0.0)) + float(cost)
 	_queued_species = selected_species
 	_spawn_ready = true
-	if selected_species == SpeciesDB.GUPPY:
+	if selected_species == SpeciesRegistry.GUPPY:
 		_cooldown = GUPPY_BURST_INTERVAL
 	else:
 		_cooldown = INDIVIDUAL_COOLDOWN
@@ -68,21 +59,20 @@ func _try_queue_spawn() -> void:
 
 
 func _roll_species() -> void:
+	var species_list: Array[StringName] = SpeciesRegistry.all_species()
+	if species_list.is_empty():
+		selected_species = SpeciesRegistry.DEFAULT_SPECIES
+		species_changed.emit(player_id, selected_species)
+		return
 	if strategy.is_empty():
-		var idx: int = randi() % 3
-		if idx == 0:
-			selected_species = SpeciesDB.GUPPY
-		elif idx == 1:
-			selected_species = SpeciesDB.SABALO
-		else:
-			selected_species = SpeciesDB.DIENTUDO
+		selected_species = species_list[randi() % species_list.size()]
 		species_changed.emit(player_id, selected_species)
 		return
 	var total_spent: float = 0.0
 	for sp: StringName in resources_spent_by_species:
 		total_spent += float(resources_spent_by_species.get(sp, 0.0))
 	var best_deficit: float = - INF
-	var best_sp: StringName = SpeciesDB.GUPPY
+	var best_sp: StringName = species_list[0]
 	for sp: StringName in strategy:
 		var target: float = float(strategy[sp])
 		var actual: float = 0.0
@@ -96,8 +86,8 @@ func _roll_species() -> void:
 	species_changed.emit(player_id, selected_species)
 
 
-func configure_strategy(name: String, weights: Dictionary) -> void:
-	strategy_name = name
+func configure_strategy(strategy_label: String, weights: Dictionary) -> void:
+	strategy_name = strategy_label
 	strategy = weights.duplicate()
 	_roll_species()
 
@@ -123,11 +113,17 @@ func consume_spawn_request() -> Dictionary:
 
 func reset() -> void:
 	resources = 0.0
-	_queued_species = SpeciesDB.GUPPY
+	_queued_species = SpeciesRegistry.DEFAULT_SPECIES
 	_spawn_ready = false
 	_cooldown = 0.0
-	for key: StringName in spawns_by_species:
-		spawns_by_species[key] = 0
-	for key: StringName in resources_spent_by_species:
-		resources_spent_by_species[key] = 0.0
+	_initialize_species_tracking()
+	selected_species = SpeciesRegistry.DEFAULT_SPECIES
 	_roll_species()
+
+
+func _initialize_species_tracking() -> void:
+	resources_spent_by_species.clear()
+	spawns_by_species.clear()
+	for species_name: StringName in SpeciesRegistry.all_species():
+		resources_spent_by_species[species_name] = 0.0
+		spawns_by_species[species_name] = 0

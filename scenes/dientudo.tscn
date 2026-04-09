@@ -3,13 +3,59 @@
 [ext_resource type="Texture2D" uid="uid://dg8npgclb5g3h" path="res://assets/dientudo.png" id="1_texture"]
 [ext_resource type="Script" uid="uid://c57rrqkjgmx1e" path="res://scripts/dientudo.gd" id="2_script"]
 
+[sub_resource type="CircleShape2D" id="CircleShape2D_keju4"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_6fqtf"]
+
 [node name="Dientudo" type="Node2D" unique_id=1473782029]
 script = ExtResource("2_script")
 species = &"dientudo"
+starting_energy = 50.0
+weight = 120.0
+spawn_weight_min_g = 105.0
+spawn_weight_max_g = 135.0
+base_points = 10.0
+top_speed = 180.0
 is_predator = true
-vision_radius = 140.0
+prey_weight_ratio_limit = 1.0
+vision_radius = 180.0
+predator_detection_radius = 140.0
 separation_radius = 32.0
+max_force = 420.0
+life_span_seconds = 80.0
+age_exit_bias = 350.0
+hunger_rate = 0.5
+eat_radius = 16.0
 visual_scale_multiplier = 7.0
+boid_weights = {
+"alignment": 0.6,
+"cohesion": 0.25,
+"separation": 1.6
+}
+sabalo_unlock_guppy_count = 5
+prey_mass_absorption_ratio = 0.5
+dart_wind_up_seconds = 0.2
+dart_duration_seconds = 0.85
+dart_cooldown_seconds = 2.2
+dash_speed_multiplier = 2.35
+dash_turn_rate_factor = 1.1
+dash_abort_edge_distance_factor = 0.35
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1246976143]
+scale = Vector2(0.7, 0.9)
 texture = ExtResource("1_texture")
+
+[node name="mouth" type="Area2D" parent="." unique_id=1415648461]
+position = Vector2(0, -209)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="mouth" unique_id=710732382]
+position = Vector2(0, 12.000002)
+scale = Vector2(2.8400002, 2.8400002)
+shape = SubResource("CircleShape2D_keju4")
+
+[node name="body" type="Area2D" parent="." unique_id=848547007]
+scale = Vector2(0.7, 0.9)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="body" unique_id=482742366]
+scale = Vector2(4.6399994, 4.6399994)
+shape = SubResource("CircleShape2D_6fqtf")

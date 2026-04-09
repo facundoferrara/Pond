@@ -1,12 +1,23 @@
 extends Fish
 class_name Guppy
 
-var flee_energy_drain_rate: float = 5.0
-var despawner_avoid_radius: float = 220.0
-var despawner_avoid_force_multiplier: float = 2.1
-var turn_rate_rad_per_sec: float = 9.0
+@export_group("Guppy: Flee")
+## Extra energy drain while actively fleeing predators.
+@export var flee_energy_drain_rate: float = 5.0
+
+@export_group("Guppy: Despawner Avoidance")
+## Radius where young guppies begin avoiding despawn zone.
+@export var despawner_avoid_radius: float = 220.0
+## Steering multiplier while avoiding despawn zone.
+@export var despawner_avoid_force_multiplier: float = 2.1
+
+@export_group("Guppy: Movement")
+## Rotation speed limit used when orienting body to velocity.
+@export var turn_rate_rad_per_sec: float = 9.0
+## Base speed ratio used by wander behavior.
+@export var wander_speed_factor: float = 0.38
+
 var wander_heading: Vector2 = Vector2.RIGHT
-var wander_speed_factor: float = 0.38
 var swim_mode: int = 0
 var mode_switch_timer: float = 0.0
 var next_mode_switch_interval: float = 3.5
@@ -15,7 +26,11 @@ var next_mode_switch_interval: float = 3.5
 func _ready() -> void:
 	species = SpeciesDB.GUPPY
 	super._ready()
-	var species_data: Dictionary = SpeciesDB.get_species(SpeciesDB.GUPPY)
+
+
+func _apply_species_defaults() -> void:
+	super._apply_species_defaults()
+	var species_data: Dictionary = SpeciesDB.get_species(species)
 	flee_energy_drain_rate = float(species_data.get("flee_energy_drain_rate", flee_energy_drain_rate))
 	despawner_avoid_radius = float(species_data.get("despawner_avoid_radius", despawner_avoid_radius))
 	despawner_avoid_force_multiplier = float(species_data.get("despawner_avoid_force_multiplier", despawner_avoid_force_multiplier))
@@ -113,7 +128,7 @@ func _update_swim_mode(delta: float) -> void:
 			swim_mode = 1 - swim_mode
 
 
-func _compute_zigzag_steering(delta: float) -> Vector2:
+func _compute_zigzag_steering(_delta: float) -> Vector2:
 	if velocity.length_squared() <= 0.000001:
 		return Vector2.ZERO
 
@@ -121,7 +136,6 @@ func _compute_zigzag_steering(delta: float) -> Vector2:
 	var lateral: Vector2 = Vector2(-forward.y, forward.x)
 	var phase: float = mode_switch_timer * 3.5
 	var zig: float = sin(phase)
-	var lateral_strength: float = zig * top_speed * 0.35
 	var desired: Vector2 = (forward + lateral * sign(zig) * 0.48).normalized() * top_speed
 	return _steer_towards(desired) * 0.78
 

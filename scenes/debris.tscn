@@ -1,0 +1,38 @@
+[gd_scene format=3 uid="uid://csl30jnhdsc7v"]
+
+[ext_resource type="Texture2D" uid="uid://c1cgg4q5l4vya" path="res://assets/pellet.png" id="1_texture"]
+[ext_resource type="Script" uid="uid://brij7dbrx7jnk" path="res://scripts/debris.gd" id="2_script"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_3j7el"]
+
+[node name="Debris" type="Node2D" unique_id=1511599220]
+script = ExtResource("2_script")
+species = &"debris"
+starting_energy = 100.0
+energy = 100.0
+weight = 4.0
+base_points = 1.0
+points = 1.0
+top_speed = 0.0
+vision_radius = 0.0
+predator_detection_radius = 0.0
+separation_radius = 0.0
+max_force = 0.0
+life_span_seconds = 9999.0
+hunger_rate = 0.0
+eat_radius = 0.0
+visual_scale_multiplier = 1.0
+scale_reference_weight_g = 4.0
+boid_weights = {
+"alignment": 0.0,
+"cohesion": 0.0,
+"separation": 0.0
+}
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1064355188]
+texture = ExtResource("1_texture")
+
+[node name="body" type="Area2D" parent="." unique_id=1386924790]
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="body" unique_id=1139825043]
+shape = SubResource("CircleShape2D_3j7el")

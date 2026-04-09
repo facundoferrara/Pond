@@ -1,6 +1,8 @@
 extends Node2D
 class_name Fish
 
+const SpeciesRegistry = preload("res://data/species_registry.gd")
+
 signal fish_exited(player_id: int, fish_points: float)
 
 enum BehaviorState {
@@ -11,34 +13,81 @@ enum BehaviorState {
 }
 
 @onready var sprite: Sprite2D = $Sprite2D
+@onready var mouth_area: Area2D = get_node_or_null("mouth") as Area2D
+@onready var body_area: Area2D = get_node_or_null("body") as Area2D
 
-@export var species: StringName = SpeciesDB.GUPPY
+@export_group("Identity")
+## Species identifier used to fetch defaults and route pooling.
+@export var species: StringName = SpeciesRegistry.GUPPY
+## Owning player index used for scoring and ally checks.
 @export_range(1, 2) var player: int = 1
+## Base tint applied to the fish sprite.
 @export var color: Color = Color(1.0, 1.0, 1.0, 1.0)
 
+@export_group("Vitals")
+@export_subgroup("Energy And Mass")
+## Energy applied at spawn/reinitialize time.
 @export var starting_energy: float = 20.0
+## Current energy consumed by hunger and flee behavior.
 @export var energy: float = 20.0
+## Current body mass in grams.
 @export var weight: float = 50.0
+## Minimum random spawn mass in grams.
+@export var spawn_weight_min_g: float = 50.0
+## Maximum random spawn mass in grams.
+@export var spawn_weight_max_g: float = 50.0
+@export_subgroup("Scoring And Predation")
+## Score value granted before runtime modifiers.
 @export var base_points: float = 1.0
+## Current score value emitted on exit.
 @export var points: float = 1.0
+## Maximum movement speed in pixels per second.
 @export var top_speed: float = 140.0
+## Enables predatory behavior checks.
 @export var is_predator: bool = false
+## Max prey ratio this fish can consume (prey <= weight * ratio).
 @export_range(0.05, 1.0, 0.05) var prey_weight_ratio_limit: float = 0.5
 
+@export_group("Sensing And Steering")
+@export_subgroup("Sensing")
+## Radius used for boid neighbor detection.
 @export var vision_radius: float = 120.0
+## Radius used to detect predators.
 @export var predator_detection_radius: float = 120.0
+@export_subgroup("Steering")
+## Desired minimum neighbor spacing.
 @export var separation_radius: float = 30.0
+## Maximum steering force applied each frame.
 @export var max_force: float = 170.0
-@export var life_span_seconds: float = 60.0
+
+@export_group("Lifecycle")
+## Lifespan used to drive aging ratio.
+@export var life_span_seconds: float = 80.0
+## Optional aging multiplier for special modes/debug.
 @export var age_speed_multiplier: float = 1.0
+## Exit pressure toward despawn as age increases.
 @export var age_exit_bias: float = 240.0
+## Energy drain per second.
 @export var hunger_rate: float = 1.2
+## Catch/eat interaction distance.
 @export var eat_radius: float = 15.0
+
+@export_group("Rendering")
+## Sprite rotation offset to align art with movement direction.
 @export var heading_offset_radians: float = PI / 2.0
+## Global multiplier for visual scale by mass.
 @export_range(0.001, 100.0, 0.001) var visual_scale_multiplier: float = 2.0
+## Mass reference used for normalized scale computation.
 @export var scale_reference_weight_g: float = 50.0
+
+@export_group("Boundary")
+## Distance considered in-contact with outer boundary.
 @export var out_touch_distance: float = 8.0
+## Distance where avoidance starts ramping in.
 @export var out_avoid_distance: float = 64.0
+
+@export_group("Debug")
+## Emits facing warnings when displacement is near zero.
 @export var debug_facing: bool = false
 
 var velocity: Vector2 = Vector2.ZERO
@@ -49,7 +98,8 @@ var behavior_state: BehaviorState = BehaviorState.SCHOOL
 var boid_neighbors: Array[Fish] = []
 var nearest_predator: Fish = null
 var despawn_area_center: Vector2 = Vector2(640.0, 540.0)
-var boid_weights: Dictionary = {
+## Weights used by boid steering terms: separation, alignment, cohesion.
+@export var boid_weights: Dictionary = {
 	"separation": 1.5,
 	"alignment": 0.9,
 	"cohesion": 0.8
@@ -69,6 +119,14 @@ var _cached_pond_center: Vector2 = Vector2.ZERO
 var _pond_center_valid: bool = false
 ## Per-fish frame offset so context updates are staggered across the population.
 var _context_frame_offset: int = 0
+var _being_consumed: bool = false
+var _consumed_by: Fish = null
+var _consume_elapsed: float = 0.0
+var _consume_duration: float = 0.14
+var _consume_start_position: Vector2 = Vector2.ZERO
+var _consume_start_sprite_scale: Vector2 = Vector2.ONE
+var _consume_start_sprite_modulate: Color = Color(1.0, 1.0, 1.0, 1.0)
+var _consume_start_z_index: int = 0
 
 const _CONTEXT_UPDATE_INTERVAL: int = 3
 
@@ -89,6 +147,10 @@ func _ready() -> void:
 func reinitialize() -> void:
 	pending_remove = false
 	is_out_of_game = false
+	_being_consumed = false
+	_consumed_by = null
+	_consume_elapsed = 0.0
+	_consume_duration = 0.14
 	age_seconds = 0.0
 	age_speed_multiplier = 1.0
 	boid_neighbors.clear()
@@ -96,8 +158,12 @@ func reinitialize() -> void:
 	behavior_state = BehaviorState.SCHOOL
 	warned_facing_no_motion = false
 	points = base_points
+	z_index = 0
+	_set_collision_participation(true)
 	velocity = Vector2.RIGHT.rotated(randf_range(-0.55, 0.55)) * top_speed * 0.35
 	previous_global_position = global_position
+	if _ensure_sprite():
+		sprite.modulate = color
 
 
 func configure_from_zoo(species_name: StringName, owner_player: int, tint: Color, bounds: Rect2) -> void:
@@ -141,6 +207,9 @@ func _age_ratio() -> float:
 func _process(delta: float) -> void:
 	if pending_remove:
 		return
+	if _being_consumed:
+		_update_consumed_motion(delta)
+		return
 
 	age_seconds += delta * maxf(age_speed_multiplier, 0.0)
 	energy = max(0.0, energy - hunger_rate * delta)
@@ -171,29 +240,12 @@ func _process(delta: float) -> void:
 
 
 func _apply_species_defaults() -> void:
-	var species_data: Dictionary = SpeciesDB.get_species(species)
-	starting_energy = float(species_data.get("starting_energy", starting_energy))
 	energy = starting_energy
-	weight = float(species_data.get("starting_weight", weight))
-	base_points = float(species_data.get("base_points", base_points))
 	points = base_points
-	top_speed = float(species_data.get("top_speed", top_speed))
-	is_predator = bool(species_data.get("is_predator", is_predator))
-	prey_weight_ratio_limit = float(species_data.get("prey_weight_ratio_limit", prey_weight_ratio_limit))
-	vision_radius = float(species_data.get("vision_radius", vision_radius))
-	predator_detection_radius = float(species_data.get("predator_detection_radius", vision_radius))
-	separation_radius = float(species_data.get("separation_radius", separation_radius))
-	max_force = float(species_data.get("max_force", max_force))
-	life_span_seconds = float(species_data.get("life_span_seconds", life_span_seconds))
-	age_exit_bias = float(species_data.get("age_exit_bias", age_exit_bias))
-	hunger_rate = float(species_data.get("hunger_rate", hunger_rate))
-	eat_radius = float(species_data.get("eat_radius", eat_radius))
-	boid_weights = species_data.get("boid_weights", boid_weights) as Dictionary
-	var texture_path: String = String(species_data.get("texture_path", ""))
-	if texture_path != "" and _ensure_sprite():
-		var texture: Texture2D = load(texture_path) as Texture2D
-		if texture != null:
-			sprite.texture = texture
+	if spawn_weight_max_g < spawn_weight_min_g:
+		var tmp: float = spawn_weight_min_g
+		spawn_weight_min_g = spawn_weight_max_g
+		spawn_weight_max_g = tmp
 
 
 func _compute_boid_steering(neighbors: Array[Fish]) -> Vector2:
@@ -259,6 +311,8 @@ func _update_context() -> void:
 	for other: Fish in nearby:
 		if other == self or other.pending_remove or not is_instance_valid(other):
 			continue
+		if other.species == SpeciesRegistry.PELLET:
+			continue
 		if global_position.distance_to(other.global_position) <= vision_radius:
 			boid_neighbors.append(other)
 
@@ -300,13 +354,77 @@ func can_hunt() -> bool:
 func can_eat_fish(target: Fish) -> bool:
 	if target == null or not is_instance_valid(target):
 		return false
-	if target == self or target.pending_remove:
+	if target == self or target.pending_remove or target.is_being_consumed():
 		return false
+	if target.species == SpeciesRegistry.PELLET:
+		return species == SpeciesRegistry.GUPPY
 	if not can_hunt():
 		return false
 	if target.species == species and target.player == player:
 		return false
 	return target.weight <= weight * prey_weight_ratio_limit
+
+
+func can_consume_target(target: Fish) -> bool:
+	if not can_eat_fish(target):
+		return false
+	if _is_mouth_touching_target_body(target):
+		return true
+	if _is_body_touching_target_body(target):
+		return true
+	return _is_within_consume_radius(target)
+
+
+func get_body_area() -> Area2D:
+	return body_area
+
+
+func _is_mouth_touching_target_body(target: Fish) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	if mouth_area == null:
+		return false
+	var target_body: Area2D = target.get_body_area()
+	if target_body == null:
+		return false
+	if not mouth_area.has_overlapping_areas():
+		return false
+	for area: Area2D in mouth_area.get_overlapping_areas():
+		if area == target_body:
+			return true
+	return false
+
+
+func _is_body_touching_target_body(target: Fish) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	if body_area == null:
+		return false
+	var target_body: Area2D = target.get_body_area()
+	if target_body == null:
+		return false
+	if not body_area.has_overlapping_areas():
+		return false
+	for area: Area2D in body_area.get_overlapping_areas():
+		if area == target_body:
+			return true
+	return false
+
+
+func _is_within_consume_radius(target: Fish) -> bool:
+	if target == null or not is_instance_valid(target):
+		return false
+	if target.pending_remove or target.is_being_consumed():
+		return false
+
+	var target_center: Vector2 = target.global_position
+	var target_body: Area2D = target.get_body_area()
+	if target_body != null:
+		target_center = target_body.global_position
+
+	var mouth_center: Vector2 = get_mouth_center_global()
+	var consume_radius: float = maxf(eat_radius, 0.0) + maxf(target.eat_radius, 0.0) * 0.5
+	return mouth_center.distance_to(target_center) <= maxf(consume_radius, 1.0)
 
 
 func _predator_valid() -> bool:
@@ -346,6 +464,85 @@ func _refresh_scale() -> void:
 func set_weight_grams(new_weight: float) -> void:
 	weight = maxf(0.001, new_weight)
 	_refresh_scale()
+
+
+func is_being_consumed() -> bool:
+	return _being_consumed
+
+
+func get_mouth_center_global() -> Vector2:
+	if mouth_area != null:
+		return mouth_area.global_position
+	return global_position
+
+
+func begin_consumed_by(predator: Fish, duration_seconds: float = 0.14) -> void:
+	if pending_remove or _being_consumed:
+		return
+	if predator == null or not is_instance_valid(predator):
+		pending_remove = true
+		FishPool.release(self )
+		return
+
+	_being_consumed = true
+	_consumed_by = predator
+	_consume_elapsed = 0.0
+	_consume_duration = maxf(duration_seconds, 0.02)
+	_consume_start_position = global_position
+	_consume_start_z_index = z_index
+	z_index = predator.z_index - 1
+	SpatialGrid.unregister_fish(self )
+	_set_collision_participation(false)
+
+	if _ensure_sprite():
+		_consume_start_sprite_scale = sprite.scale
+		_consume_start_sprite_modulate = sprite.modulate
+		# Keep fish visible while it gets pulled into the predator mouth.
+		sprite.modulate = Color(
+			_consume_start_sprite_modulate.r,
+			_consume_start_sprite_modulate.g,
+			_consume_start_sprite_modulate.b,
+			color.a
+		)
+
+
+func _update_consumed_motion(delta: float) -> void:
+	if not _being_consumed:
+		return
+	if _consumed_by == null or not is_instance_valid(_consumed_by) or _consumed_by.pending_remove:
+		pending_remove = true
+		_being_consumed = false
+		FishPool.release(self )
+		return
+
+	_consume_elapsed += delta
+	var t: float = clampf(_consume_elapsed / maxf(_consume_duration, 0.001), 0.0, 1.0)
+	var eased: float = 1.0 - pow(1.0 - t, 3.0)
+	global_position = _consume_start_position.lerp(_consumed_by.get_mouth_center_global(), eased)
+
+	if _ensure_sprite():
+		var alpha: float = lerpf(_consume_start_sprite_modulate.a, 0.0, eased)
+		sprite.modulate = Color(
+			_consume_start_sprite_modulate.r,
+			_consume_start_sprite_modulate.g,
+			_consume_start_sprite_modulate.b,
+			alpha
+		)
+		sprite.scale = _consume_start_sprite_scale.lerp(Vector2.ZERO, eased)
+
+	if t >= 1.0:
+		pending_remove = true
+		_being_consumed = false
+		FishPool.release(self )
+
+
+func _set_collision_participation(enabled: bool) -> void:
+	if mouth_area != null:
+		mouth_area.monitoring = enabled
+		mouth_area.monitorable = enabled
+	if body_area != null:
+		body_area.monitoring = enabled
+		body_area.monitorable = enabled
 
 
 func _update_orientation() -> void:
@@ -435,15 +632,6 @@ func _compute_spawner_repulsion() -> Vector2:
 		total += _steer_towards(desired) * (repel_multiplier * 2.1 * scaled_strength)
 
 	return total
-
-
-func _is_touching_out_boundary(point: Vector2) -> bool:
-	if out_boundary_polygon.size() < 3:
-		return false
-	var nearest_data: Dictionary = _nearest_point_on_out_boundary(point)
-	if nearest_data.is_empty():
-		return false
-	return float(nearest_data["distance"]) <= out_touch_distance
 
 
 func _nearest_point_on_out_boundary(point: Vector2) -> Dictionary:
