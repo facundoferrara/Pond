@@ -45,6 +45,24 @@ func query_neighbors(pos: Vector2, radius: float) -> Array[Fish]:
 	return result
 
 
+## Returns neighbors limited to one species for cheap target acquisition.
+func query_neighbors_by_species(pos: Vector2, radius: float, species_name: StringName) -> Array[Fish]:
+	var result: Array[Fish] = []
+	for fish: Fish in query_neighbors(pos, radius):
+		if fish.species == species_name:
+			result.append(fish)
+	return result
+
+
+## Returns neighbors whose species are in the provided whitelist.
+func query_neighbors_by_species_set(pos: Vector2, radius: float, species_set: Array[StringName]) -> Array[Fish]:
+	var result: Array[Fish] = []
+	for fish: Fish in query_neighbors(pos, radius):
+		if species_set.has(fish.species):
+			result.append(fish)
+	return result
+
+
 ## Returns the live predator fish list.
 func get_potential_predators() -> Array[Fish]:
 	return _potential_predators

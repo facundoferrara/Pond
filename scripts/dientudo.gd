@@ -1,12 +1,11 @@
 extends Fish
 class_name Dientudo
 
-signal prey_predated(prey_position: Vector2, prey_weight_g: float)
+signal prey_predated(prey_position: Vector2, prey_weight_g: float, predator_player: int, prey_player: int, prey_species: StringName, prey_fish_id: int, prey_feed_count: int)
 
 enum HuntState {
 	IDLE,
-	WINDING_UP,
-	DARTING
+	CHASING
 }
 
 @export_group("Dientudo: Debug")
@@ -17,49 +16,30 @@ enum HuntState {
 
 var hunt_state: HuntState = HuntState.IDLE
 var target_prey: Fish = null
-var starting_weight_original: float = 0.0
 @export_group("Dientudo: Hunt")
-## Maximum growth ratio before predator stops hunting.
-@export var max_size_growth_ratio: float = 1.2
-## Wind-up time before dart starts.
-@export var dart_wind_up_seconds: float = 0.5
-## Maximum dart duration.
-@export var dart_duration_seconds: float = 1.0
-## Cooldown after a dart attempt.
-@export var dart_cooldown_seconds: float = 5.0
-## Speed multiplier applied during dart.
-@export var dash_speed_multiplier: float = 3.0
-## Turn responsiveness factor while dashing.
-@export var dash_turn_rate_factor: float = 0.25
-## Edge-distance factor where dash gets aborted near boundary.
-@export var dash_abort_edge_distance_factor: float = 0.5
+## Multiplier for chase steering while pursuing prey.
+@export var chase_steering_multiplier: float = 2.3
+## Blend strength that pulls wander toward pond center.
+@export_range(0.0, 1.0, 0.01) var roam_center_bias_strength: float = 0.45
 
 @export_group("Dientudo: Digestion")
 ## Digested mass per second after consuming prey.
 @export var digestion_speed_g_per_sec: float = 30.0
-var wind_up_timer: float = 0.0
-var dart_timer: float = 0.0
-var dart_cooldown_timer: float = 0.0
 var digesting_mass_remaining_g: float = 0.0
 var wander_heading: Vector2 = Vector2.RIGHT
-var at_max_size: bool = false
+var point_mass_remainder_g: float = 0.0
 
 
 func _ready() -> void:
 	species = SpeciesDB.DIENTUDO
 	super._ready()
-	starting_weight_original = weight
 
 
 func _apply_species_defaults() -> void:
 	super._apply_species_defaults()
 	var species_data: Dictionary = SpeciesDB.get_species(species)
-	max_size_growth_ratio = float(species_data.get("max_size_growth_ratio", max_size_growth_ratio))
-	dart_wind_up_seconds = float(species_data.get("dart_wind_up_seconds", dart_wind_up_seconds))
-	dart_duration_seconds = float(species_data.get("dart_duration_seconds", dart_duration_seconds))
-	dart_cooldown_seconds = float(species_data.get("dart_cooldown_seconds", dart_cooldown_seconds))
-	dash_speed_multiplier = float(species_data.get("dash_speed_multiplier", dash_speed_multiplier))
-	dash_turn_rate_factor = float(species_data.get("dash_turn_rate_factor", dash_turn_rate_factor))
+	chase_steering_multiplier = float(species_data.get("chase_steering_multiplier", chase_steering_multiplier))
+	roam_center_bias_strength = float(species_data.get("roam_center_bias_strength", roam_center_bias_strength))
 	digestion_speed_g_per_sec = float(species_data.get("digestion_speed_g_per_sec", digestion_speed_g_per_sec))
 
 
@@ -67,17 +47,12 @@ func reinitialize() -> void:
 	super.reinitialize()
 	hunt_state = HuntState.IDLE
 	target_prey = null
-	wind_up_timer = 0.0
-	dart_timer = 0.0
-	dart_cooldown_timer = 0.0
 	digesting_mass_remaining_g = 0.0
-	at_max_size = false
-	starting_weight_original = weight
+	point_mass_remainder_g = 0.0
 	wander_heading = Vector2.RIGHT.rotated(randf_range(-PI, PI))
 
 
 func _process(delta: float) -> void:
-	dart_cooldown_timer = maxf(0.0, dart_cooldown_timer - delta)
 	digesting_mass_remaining_g = maxf(0.0, digesting_mass_remaining_g - digestion_speed_g_per_sec * delta)
 	super._process(delta)
 	if debug_gizmo_enabled and not pending_remove:
@@ -87,7 +62,7 @@ func _process(delta: float) -> void:
 func can_hunt() -> bool:
 	if not is_predator:
 		return false
-	if at_max_size:
+	if not can_feed():
 		return false
 	return digesting_mass_remaining_g <= 0.001
 
@@ -102,7 +77,9 @@ func _update_context() -> void:
 	for other: Fish in SpatialGrid.get_potential_predators():
 		if other == self or other.pending_remove or not is_instance_valid(other):
 			continue
-		if not other.can_eat_fish(self ):
+		if not other.can_eat_target(self ):
+			continue
+		if other.weight < weight * maxf(flee_override_predator_ratio, 1.0):
 			continue
 		var distance: float = global_position.distance_to(other.global_position)
 		if distance > predator_detection_radius:
@@ -126,7 +103,7 @@ func _update_context() -> void:
 	for other: Fish in nearby:
 		if other == self or other.pending_remove or not is_instance_valid(other):
 			continue
-		if not can_eat_fish(other):
+		if not can_eat_target(other):
 			continue
 		var distance: float = global_position.distance_to(other.global_position)
 		if distance > vision_radius:
@@ -142,9 +119,10 @@ func _update_behavior_state() -> void:
 		hunt_state = HuntState.IDLE
 		target_prey = null
 		return
-
-	if at_max_size:
+	if not can_feed():
 		behavior_state = BehaviorState.DESCEND
+		hunt_state = HuntState.IDLE
+		target_prey = null
 		return
 
 	if target_prey != null and is_instance_valid(target_prey) and not target_prey.pending_remove and can_hunt():
@@ -157,8 +135,7 @@ func _update_behavior_state() -> void:
 func _compute_acceleration(delta: float) -> Vector2:
 	if _predator_valid():
 		return _steer_towards(get_escape_vector()) * 2.0
-
-	if at_max_size:
+	if behavior_state == BehaviorState.DESCEND:
 		return _steer_towards_despawn()
 
 	if behavior_state == BehaviorState.FEED and target_prey != null and is_instance_valid(target_prey):
@@ -173,7 +150,7 @@ func _compute_hunt_acceleration(delta: float) -> Vector2:
 	if target_prey == null or not is_instance_valid(target_prey) or target_prey.pending_remove:
 		hunt_state = HuntState.IDLE
 		return Vector2.ZERO
-	if not can_hunt() or not can_eat_fish(target_prey):
+	if not can_hunt() or not can_eat_target(target_prey):
 		hunt_state = HuntState.IDLE
 		target_prey = null
 		return Vector2.ZERO
@@ -189,51 +166,12 @@ func _compute_hunt_acceleration(delta: float) -> Vector2:
 		_consume_prey(target_prey)
 		target_prey = null
 		hunt_state = HuntState.IDLE
-		dart_cooldown_timer = dart_cooldown_seconds
 		return Vector2.ZERO
 
-	if dart_cooldown_timer > 0.0:
-		return _compute_wander(delta)
-
-	if hunt_state == HuntState.IDLE:
-		hunt_state = HuntState.WINDING_UP
-		wind_up_timer = 0.0
-
-	if hunt_state == HuntState.WINDING_UP:
-		wind_up_timer += delta
-		if wind_up_timer >= dart_wind_up_seconds:
-			hunt_state = HuntState.DARTING
-			wind_up_timer = 0.0
-			dart_timer = 0.0
-		var desired_windup: Vector2 = to_prey.normalized() * top_speed * 0.2
-		return _steer_towards(desired_windup) * 0.5
-
-	if hunt_state == HuntState.DARTING:
-		dart_timer += delta
-		
-		# Check if too close to boundary and abort dash if necessary
-		var boundary_data: Dictionary = _nearest_point_on_out_boundary(global_position)
-		if not boundary_data.is_empty():
-			var distance_to_boundary: float = float(boundary_data["distance"])
-			if distance_to_boundary <= out_avoid_distance * dash_abort_edge_distance_factor:
-				hunt_state = HuntState.IDLE
-				dart_timer = 0.0
-				dart_cooldown_timer = dart_cooldown_seconds
-				return _compute_out_boundary_avoidance()
-		
-		if dart_timer >= dart_duration_seconds:
-			hunt_state = HuntState.IDLE
-			dart_timer = 0.0
-			dart_cooldown_timer = dart_cooldown_seconds
-			return _compute_wander(delta)
-
-	var dash_speed: float = top_speed * dash_speed_multiplier
-	var desired_dart: Vector2 = to_prey.normalized() * dash_speed
-	var reduced_force: float = max_force * dash_turn_rate_factor
-	var steer: Vector2 = desired_dart - velocity
-	if steer.length() > reduced_force:
-		steer = steer.normalized() * reduced_force
-	return steer
+	# Continuous chase replaces legacy dart/wind-up states.
+	hunt_state = HuntState.CHASING
+	var desired: Vector2 = to_prey.normalized() * top_speed
+	return _steer_towards(desired) * chase_steering_multiplier
 
 
 func _consume_prey(prey: Fish) -> void:
@@ -243,26 +181,38 @@ func _consume_prey(prey: Fish) -> void:
 		return
 
 	var prey_weight: float = prey.weight
-	var prey_points: float = prey.points
 	var prey_position: Vector2 = prey.global_position
-	var absorbed_mass: float = prey_weight * 0.2
-	weight += absorbed_mass
-	points += prey_points * 0.5
+	var prey_player: int = prey.player
+	var prey_species: StringName = prey.species
+	var prey_fish_id: int = prey.get_instance_id()
+	var prey_feed_count: int = prey.get_successful_feed_count()
+	var absorbed_mass: float = prey_weight * 0.1
+	point_mass_remainder_g += prey_weight
+	var earned_points: int = int(floor(point_mass_remainder_g / 50.0))
+	if earned_points > 0:
+		add_points(earned_points)
+		point_mass_remainder_g -= float(earned_points) * 50.0
+	mark_successful_feed(absorbed_mass)
 	digesting_mass_remaining_g += absorbed_mass
-	prey_predated.emit(prey_position, prey_weight)
+	prey_predated.emit(prey_position, prey_weight, player, prey_player, prey_species, prey_fish_id, prey_feed_count)
 
 	prey.pending_remove = true
 	FishPool.release(prey)
 
-	var max_weight: float = starting_weight_original * max_size_growth_ratio
-	if weight >= max_weight:
-		at_max_size = true
-		weight = max_weight
-
 
 func _compute_wander(delta: float) -> Vector2:
 	wander_heading = wander_heading.rotated(randf_range(-1.8, 1.8) * delta)
-	var desired: Vector2 = wander_heading * top_speed * 0.6
+	var random_dir: Vector2 = wander_heading
+	if random_dir.length_squared() <= 0.000001:
+		random_dir = Vector2.RIGHT.rotated(randf_range(-PI, PI))
+	var center_dir: Vector2 = (_pond_center_point() - global_position)
+	if center_dir.length_squared() <= 0.000001:
+		center_dir = random_dir
+	var center_t: float = clampf(roam_center_bias_strength, 0.0, 1.0)
+	var desired_dir: Vector2 = (random_dir.normalized() * (1.0 - center_t)) + (center_dir.normalized() * center_t)
+	if desired_dir.length_squared() <= 0.000001:
+		desired_dir = random_dir.normalized()
+	var desired: Vector2 = desired_dir.normalized() * top_speed * 0.6
 	return _steer_towards(desired) * 0.7
 
 

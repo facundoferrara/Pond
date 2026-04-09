@@ -14,7 +14,6 @@ starting_energy = 50.0
 weight = 120.0
 spawn_weight_min_g = 105.0
 spawn_weight_max_g = 135.0
-base_points = 10.0
 top_speed = 180.0
 is_predator = true
 prey_weight_ratio_limit = 1.0

@@ -33,7 +33,6 @@ func _ready() -> void:
 func reinitialize() -> void:
 	super.reinitialize()
 	z_index = pellet_overlay_z_index
-	points = 0.0
 	_drift_phase = randf_range(0.0, TAU)
 	var flow_dir: Vector2 = (despawn_area_center - global_position)
 	if flow_dir.length_squared() <= 0.000001:

@@ -12,7 +12,6 @@ script = ExtResource("2_script")
 starting_energy = 60.0
 weight = 40.0
 spawn_weight_min_g = 30.0
-base_points = 0.0
 top_speed = 68.4
 predator_detection_radius = 130.0
 life_span_seconds = 80.0

@@ -1,7 +1,5 @@
 extends Node
 
-const SpeciesRegistry = preload("res://data/species_registry.gd")
-
 ## Dynamic, growing object pool for Fish nodes.
 ## Pre-warms a baseline count at startup to avoid first-spawn hitches.
 ## When the free list is exhausted, allocates a new instance and keeps it permanently.
@@ -12,7 +10,7 @@ const SpeciesRegistry = preload("res://data/species_registry.gd")
 @export var pre_warm_sabalo_count: int = 10
 @export var pre_warm_dientudo_count: int = 5
 @export var pre_warm_pellet_count: int = 50
-@export var pre_warm_debris_count: int = 20
+@export var pre_warm_detritus_count: int = 20
 
 var _free_by_species: Dictionary = {}
 
@@ -84,8 +82,8 @@ func _prewarm_count(species_name: StringName) -> int:
 			return pre_warm_dientudo_count
 		SpeciesRegistry.PELLET:
 			return pre_warm_pellet_count
-		SpeciesRegistry.DEBRIS:
-			return pre_warm_debris_count
+		SpeciesRegistry.DETRITUS:
+			return pre_warm_detritus_count
 	return 0
 
 

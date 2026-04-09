@@ -21,6 +21,14 @@ var wander_heading: Vector2 = Vector2.RIGHT
 var swim_mode: int = 0
 var mode_switch_timer: float = 0.0
 var next_mode_switch_interval: float = 3.5
+var pellet_target: Fish = null
+var pellets_eaten: int = 0
+var exhaustion_time: float = 0.0
+
+const _ENERGY_GAIN_PER_PELLET: float = 5.0
+const _WEIGHT_GAIN_PER_PELLET_G: float = 10.0
+const _EXHAUSTION_RAMP_SECONDS: float = 4.0
+const _MAX_EXHAUSTION_SPEED_NERF: float = 0.2
 
 
 func _ready() -> void:
@@ -43,41 +51,88 @@ func reinitialize() -> void:
 	swim_mode = 0
 	mode_switch_timer = 0.0
 	next_mode_switch_interval = randf_range(2.0, 5.0)
+	pellet_target = null
+	pellets_eaten = 0
+	exhaustion_time = 0.0
 
 
 func _process(delta: float) -> void:
 	super._process(delta)
 	_update_swim_mode(delta)
 	if _is_exhausted():
-		if velocity.length() > top_speed * 0.6:
-			velocity = velocity.normalized() * top_speed * 0.6
-	_refresh_age_tint()
+		exhaustion_time = minf(_EXHAUSTION_RAMP_SECONDS, exhaustion_time + delta)
+	else:
+		exhaustion_time = maxf(0.0, exhaustion_time - delta)
+
+	var exhaustion_t: float = clampf(exhaustion_time / _EXHAUSTION_RAMP_SECONDS, 0.0, 1.0)
+	var speed_factor: float = 1.0 - (_MAX_EXHAUSTION_SPEED_NERF * exhaustion_t)
+	var speed_cap: float = top_speed * speed_factor
+	if _is_exhausted():
+		if velocity.length() > speed_cap:
+			velocity = velocity.normalized() * speed_cap
 
 
 func _compute_acceleration(delta: float) -> Vector2:
 	var avoid_despawner: Vector2 = _compute_despawner_avoidance()
+	var pellet_turnover_bias: Vector2 = _compute_pellet_turnover_despawn_bias()
+	if behavior_state == BehaviorState.FEED and pellet_target != null and is_instance_valid(pellet_target):
+		var to_pellet: Vector2 = pellet_target.global_position - global_position
+		if to_pellet.length_squared() > 0.000001:
+			var desired: Vector2 = to_pellet.normalized() * top_speed
+			return _steer_towards(desired) * 1.8 + avoid_despawner + pellet_turnover_bias
 
 	if behavior_state == BehaviorState.FLEE:
 		var flee_steer: Vector2 = _compute_distance_scaled_flee_steer()
 		energy = maxf(0.0, energy - flee_energy_drain_rate * delta)
 		if _is_exhausted():
-			return flee_steer + avoid_despawner
+			return flee_steer + avoid_despawner + pellet_turnover_bias
 		var flee: Vector2 = flee_steer * 2.1
 		var support_school: Vector2 = _compute_boid_steering(boid_neighbors) * 0.35
-		return flee + support_school + avoid_despawner
+		return flee + support_school + avoid_despawner + pellet_turnover_bias
 
 	if _is_exhausted():
 		if _age_ratio() < 0.75:
-			return avoid_despawner
-		return _steer_towards_despawn()
+			return avoid_despawner + pellet_turnover_bias
+		return _steer_towards_despawn() + pellet_turnover_bias
 
 	var boid: Vector2 = _compute_age_aware_boid_steering()
 	var age_bias: Vector2 = _compute_age_despawn_bias()
 	var wander: Vector2 = _compute_wander(delta)
-	var result: Vector2 = boid + age_bias + wander + avoid_despawner
+	var result: Vector2 = boid + age_bias + wander + avoid_despawner + pellet_turnover_bias
 	if swim_mode == 1:
 		result += _compute_zigzag_steering(delta)
 	return result
+
+
+func _update_context() -> void:
+	super._update_context()
+	pellet_target = null
+	if _predator_valid():
+		return
+	var nearest_distance: float = INF
+	var nearby: Array[Fish] = SpatialGrid.query_neighbors_by_species(global_position, vision_radius, SpeciesRegistry.PELLET)
+	for other: Fish in nearby:
+		if other == self or other.pending_remove or not is_instance_valid(other):
+			continue
+		var distance: float = global_position.distance_to(other.global_position)
+		if distance > vision_radius:
+			continue
+		if distance < nearest_distance:
+			nearest_distance = distance
+			pellet_target = other
+
+
+func _update_behavior_state() -> void:
+	if _predator_valid():
+		behavior_state = BehaviorState.FLEE
+		return
+	if _age_ratio() >= 1.0:
+		behavior_state = BehaviorState.DESCEND
+		return
+	if pellet_target != null and is_instance_valid(pellet_target) and not pellet_target.pending_remove:
+		behavior_state = BehaviorState.FEED
+		return
+	behavior_state = BehaviorState.SCHOOL
 
 
 func _compute_distance_scaled_flee_steer() -> Vector2:
@@ -202,17 +257,7 @@ func _compute_despawner_avoidance() -> Vector2:
 
 
 func _refresh_age_tint() -> void:
-	if not _ensure_sprite():
-		return
-	var ratio: float = _age_ratio()
-	if ratio < 0.75:
-		sprite.modulate = color
-		return
-	var t: float = (ratio - 0.75) / 0.25
-	var hsv: Vector3 = Vector3(color.h, color.s, color.v)
-	var target_s: float = hsv.y * 0.5
-	var current_s: float = lerpf(hsv.y, target_s, t)
-	sprite.modulate = Color.from_hsv(hsv.x, current_s, hsv.z, color.a)
+	return
 
 
 func _update_orientation() -> void:
@@ -236,4 +281,25 @@ func _update_orientation() -> void:
 
 
 func _process_feeding(_delta: float) -> void:
-	return
+	if not can_feed():
+		return
+	if behavior_state != BehaviorState.FEED:
+		return
+	if pellet_target == null or not is_instance_valid(pellet_target) or pellet_target.pending_remove:
+		return
+	if global_position.distance_to(pellet_target.global_position) > eat_radius:
+		return
+	pellets_eaten += 1
+	add_points(1)
+	mark_successful_feed(_WEIGHT_GAIN_PER_PELLET_G)
+	energy += _ENERGY_GAIN_PER_PELLET
+	pellet_target.pending_remove = true
+	FishPool.release(pellet_target)
+	pellet_target = null
+
+
+func _compute_pellet_turnover_despawn_bias() -> Vector2:
+	if pellets_eaten <= 0:
+		return Vector2.ZERO
+	var pellet_scale: float = float(pellets_eaten) / 5.0
+	return _steer_towards_despawn() * (0.08 + pellet_scale * 0.08)

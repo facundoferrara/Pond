@@ -1,15 +1,17 @@
 extends Node2D
 class_name FishSpawner
 
-const SpeciesRegistry = preload("res://data/species_registry.gd")
-
 @export_range(1, 2) var player_id: int = 1
 @export var spawn_jitter_radius: float = 30.0
 @export var repel_radius: float = 340.0
 @export var repel_force_multiplier: float = 1.8
+@export var use_fixed_seed: bool = false
+@export var fixed_seed: int = 1
+@export_range(0.0, 2.0, 0.01) var allocation_correction_strength: float = 0.7
+@export_range(0.0, 1.0, 0.01) var min_target_retention_ratio: float = 0.2
 
 const RESOURCE_MAX: float = 100.0
-const RESOURCE_REGEN: float = 1.0 ## Points regenerated per second.
+const RESOURCE_REGEN: float = 1.0 ## Resources regenerated per second.
 const GUPPY_BURST_INTERVAL: float = 0.22 ## Seconds between guppies in a burst.
 const INDIVIDUAL_COOLDOWN: float = 0.5 ## Seconds after spawning sabalo/dientudo.
 
@@ -27,12 +29,17 @@ var strategy: Dictionary = {}
 var strategy_name: String = "random"
 var resources_spent_by_species: Dictionary = {}
 var spawns_by_species: Dictionary = {}
+var _rng: RandomNumberGenerator = RandomNumberGenerator.new()
 
 signal species_changed(pid: int, species: StringName)
 
 
 func _ready() -> void:
 	add_to_group("fish_spawners")
+	if use_fixed_seed:
+		_rng.seed = fixed_seed
+	else:
+		_rng.randomize()
 	_initialize_species_tracking()
 
 
@@ -65,24 +72,46 @@ func _roll_species() -> void:
 		species_changed.emit(player_id, selected_species)
 		return
 	if strategy.is_empty():
-		selected_species = species_list[randi() % species_list.size()]
+		selected_species = species_list[_rng.randi_range(0, species_list.size() - 1)]
 		species_changed.emit(player_id, selected_species)
 		return
 	var total_spent: float = 0.0
 	for sp: StringName in resources_spent_by_species:
 		total_spent += float(resources_spent_by_species.get(sp, 0.0))
-	var best_deficit: float = - INF
-	var best_sp: StringName = species_list[0]
+
+	var weighted_species: Array[StringName] = []
+	var weighted_values: Array[float] = []
+	var weighted_total: float = 0.0
 	for sp: StringName in strategy:
-		var target: float = float(strategy[sp])
+		var target: float = maxf(0.0, float(strategy.get(sp, 0.0)))
+		if target <= 0.0:
+			continue
 		var actual: float = 0.0
 		if total_spent > 0.0:
 			actual = float(resources_spent_by_species.get(sp, 0.0)) / total_spent
 		var deficit: float = target - actual
-		if deficit > best_deficit:
-			best_deficit = deficit
-			best_sp = sp
-	selected_species = best_sp
+		var corrected: float = target + deficit * allocation_correction_strength
+		var retained_floor: float = target * min_target_retention_ratio
+		var adjusted_weight: float = maxf(retained_floor, corrected)
+		if adjusted_weight <= 0.0:
+			continue
+		weighted_species.append(sp)
+		weighted_values.append(adjusted_weight)
+		weighted_total += adjusted_weight
+
+	if weighted_species.is_empty() or weighted_total <= 0.0:
+		selected_species = species_list[_rng.randi_range(0, species_list.size() - 1)]
+		species_changed.emit(player_id, selected_species)
+		return
+
+	var roll: float = _rng.randf_range(0.0, weighted_total)
+	var accum: float = 0.0
+	selected_species = weighted_species[weighted_species.size() - 1]
+	for i: int in weighted_species.size():
+		accum += weighted_values[i]
+		if roll <= accum:
+			selected_species = weighted_species[i]
+			break
 	species_changed.emit(player_id, selected_species)
 
 
@@ -94,6 +123,12 @@ func configure_strategy(strategy_label: String, weights: Dictionary) -> void:
 
 func can_spawn(_current_count: int) -> bool:
 	return _spawn_ready
+
+
+func add_resource(amount: float) -> void:
+	if amount <= 0.0:
+		return
+	resources = minf(RESOURCE_MAX, resources + amount)
 
 
 func consume_spawn_request() -> Dictionary:

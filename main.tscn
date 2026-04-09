@@ -1,7 +1,8 @@
-[gd_scene load_steps=2 format=3 uid="uid://c0g8531p3vl3y"]
+[gd_scene format=3 uid="uid://c0g8531p3vl3y"]
 
 [ext_resource type="PackedScene" uid="uid://b4t57ow634gmu" path="res://scenes/zoo.tscn" id="1_zoo"]
 
-[node name="Main" type="Node2D"]
+[node name="Main" type="Node2D" unique_id=199634151]
 
-[node name="Zoo" parent="." instance=ExtResource("1_zoo")]
+[node name="Zoo" parent="." unique_id=1656853360 instance=ExtResource("1_zoo")]
+round_robin_laps = 5

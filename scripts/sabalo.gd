@@ -1,6 +1,8 @@
 extends Fish
 class_name Sabalo
 
+signal feeding_source_called(source_position: Vector2)
+
 @export_group("Sabalo: Debug")
 ## Draws behavior gizmos for local debugging.
 @export var debug_gizmo_enabled: bool = false
@@ -18,14 +20,17 @@ var feed_phase: float = 0.0
 @export var feeding_energy_ratio: float = 0.92
 ## Energy gained each second while feeding.
 @export var feeding_energy_gain: float = 1.35
-## Points generated each second while feeding.
-@export var feed_points_per_second: float = 0.5
 ## Lockout duration before feeding is allowed after spawn/reset.
 @export var feed_lock_seconds: float = 8.0
 var feed_lock_remaining: float = 0.0
 var feed_origin: Vector2 = Vector2.ZERO
 var feed_escape_dir: Vector2 = Vector2.ZERO
 var feed_origin_valid: bool = false
+var target_detritus: Detritus = null
+var detritus_consume_progress: float = 0.0
+var detritus_units_consumed: int = 0
+var feed_call_remaining: float = 0.0
+var feed_call_position: Vector2 = Vector2.ZERO
 
 @export_group("Sabalo: Zone Handling")
 ## Radius where young sabalos avoid despawn zone.
@@ -76,6 +81,8 @@ var unstuck_zone_lock: bool = false
 @export var panic_cooldown_seconds: float = 5.0
 ## Speed multiplier while panicking.
 @export var panic_speed_multiplier: float = 2.0
+## Energy spent when triggering the flee burst.
+@export var burst_energy_cost: float = 5.0
 var panic_remaining: float = 0.0
 var panic_cooldown_remaining: float = 0.0
 var panic_dir: Vector2 = Vector2.ZERO
@@ -92,9 +99,15 @@ func _ready() -> void:
 
 func reinitialize() -> void:
 	super.reinitialize()
+	debug_gizmo_enabled = false
 	feed_lock_remaining = feed_lock_seconds
 	feed_origin_valid = false
 	feed_escape_dir = Vector2.ZERO
+	target_detritus = null
+	detritus_consume_progress = 0.0
+	detritus_units_consumed = 0
+	feed_call_remaining = 0.0
+	feed_call_position = Vector2.ZERO
 	spawn_egress_lock_remaining = spawn_egress_lock_seconds
 	unstuck_boost_remaining = 0.0
 	stalled_time = 0.0
@@ -104,10 +117,17 @@ func reinitialize() -> void:
 	panic_remaining = 0.0
 	panic_cooldown_remaining = 0.0
 	panic_dir = Vector2.ZERO
+	queue_redraw()
+
+
+func set_debug_focus(enabled: bool) -> void:
+	debug_gizmo_enabled = enabled
+	queue_redraw()
 
 
 func _process(delta: float) -> void:
 	feed_lock_remaining = maxf(0.0, feed_lock_remaining - delta)
+	feed_call_remaining = maxf(0.0, feed_call_remaining - delta)
 	spawn_egress_lock_remaining = maxf(0.0, spawn_egress_lock_remaining - delta)
 	unstuck_boost_remaining = maxf(0.0, unstuck_boost_remaining - delta)
 	panic_remaining = maxf(0.0, panic_remaining - delta)
@@ -125,7 +145,6 @@ func _apply_species_defaults() -> void:
 	feeding_chance_per_second = float(species_data.get("feeding_chance_per_second", feeding_chance_per_second))
 	feeding_energy_ratio = float(species_data.get("feeding_energy_ratio", feeding_energy_ratio))
 	feeding_energy_gain = float(species_data.get("feeding_energy_gain", feeding_energy_gain))
-	feed_points_per_second = float(species_data.get("feed_points_per_second", feed_points_per_second))
 	feed_lock_seconds = float(species_data.get("feed_lock_seconds", feed_lock_seconds))
 	despawner_avoid_radius = float(species_data.get("despawner_avoid_radius", despawner_avoid_radius))
 	despawner_avoid_force_multiplier = float(species_data.get("despawner_avoid_force_multiplier", despawner_avoid_force_multiplier))
@@ -146,6 +165,7 @@ func _apply_species_defaults() -> void:
 	panic_duration_seconds = float(species_data.get("panic_duration_seconds", panic_duration_seconds))
 	panic_cooldown_seconds = float(species_data.get("panic_cooldown_seconds", panic_cooldown_seconds))
 	panic_speed_multiplier = float(species_data.get("panic_speed_multiplier", panic_speed_multiplier))
+	burst_energy_cost = float(species_data.get("burst_energy_cost", burst_energy_cost))
 
 
 func _update_orientation() -> void:
@@ -158,7 +178,8 @@ func _update_orientation() -> void:
 		return
 
 	var target_angle: float = atan2(displacement.y, displacement.x)
-	var max_step: float = turn_rate_rad_per_sec * get_process_delta_time()
+	var burst_turn_multiplier: float = 2.6 if panic_remaining > 0.0 else 1.0
+	var max_step: float = turn_rate_rad_per_sec * burst_turn_multiplier * get_process_delta_time()
 	global_rotation = rotate_toward(global_rotation, target_angle, max_step)
 	sprite.rotation = heading_offset_radians
 	previous_global_position = global_position
@@ -185,7 +206,9 @@ func _update_context() -> void:
 	for other: Fish in SpatialGrid.get_potential_predators():
 		if other == self or other.pending_remove or not is_instance_valid(other):
 			continue
-		if not other.can_eat_fish(self ):
+		if not other.can_eat_target(self ):
+			continue
+		if other.weight < weight * maxf(flee_override_predator_ratio, 1.0):
 			continue
 		var distance: float = global_position.distance_to(other.global_position)
 		if distance > vision_radius:
@@ -193,6 +216,34 @@ func _update_context() -> void:
 		if distance < nearest_distance:
 			nearest_distance = distance
 			nearest_predator = other
+
+	var current_detritus: Detritus = target_detritus
+	target_detritus = null
+	if _predator_valid():
+		detritus_consume_progress = 0.0
+		return
+
+	if behavior_state == BehaviorState.FEED and current_detritus != null and is_instance_valid(current_detritus) and not current_detritus.pending_remove and current_detritus.detritus_value > 0:
+		target_detritus = current_detritus
+		return
+
+	var nearest_detritus_distance: float = INF
+	var nearby_detritus: Array[Fish] = SpatialGrid.query_neighbors_by_species(global_position, vision_radius, SpeciesRegistry.DETRITUS)
+	for other: Fish in nearby_detritus:
+		if other.pending_remove or not is_instance_valid(other):
+			continue
+		if not (other is Detritus):
+			continue
+		var detritus: Detritus = other as Detritus
+		if detritus.detritus_value <= 0:
+			continue
+		var distance: float = global_position.distance_to(detritus.global_position)
+		if distance < nearest_detritus_distance:
+			nearest_detritus_distance = distance
+			target_detritus = detritus
+
+	if target_detritus != current_detritus:
+		detritus_consume_progress = 0.0
 
 
 func _update_behavior_state() -> void:
@@ -202,46 +253,65 @@ func _update_behavior_state() -> void:
 
 func _compute_acceleration(delta: float) -> Vector2:
 	var avoid_despawner: Vector2 = _compute_despawner_avoidance()
+	if not can_feed():
+		behavior_state = BehaviorState.DESCEND
+		feed_origin_valid = false
+		detritus_consume_progress = 0.0
+		# Descend should bias navigation, not override it like a hard tractor pull.
+		var descend_bias: Vector2 = _compute_despawn_bias() * 0.62
+		var drift_motion: Vector2 = _compose_school_motion(delta) * 0.58
+		return drift_motion + descend_bias + avoid_despawner
 	if _predator_valid():
 		if _can_trigger_panic():
 			_begin_panic_from_flock_center()
 		if panic_remaining > 0.0:
 			behavior_state = BehaviorState.FLEE
 			feed_origin_valid = false
+			detritus_consume_progress = 0.0
 			return _compute_panic_escape() + avoid_despawner
 		behavior_state = BehaviorState.FLEE
 		feed_origin_valid = false
+		detritus_consume_progress = 0.0
 		return _compute_predator_escape() + avoid_despawner
 
 	if spawn_egress_lock_remaining > 0.0:
 		behavior_state = BehaviorState.SCHOOL
 		feed_origin_valid = false
+		detritus_consume_progress = 0.0
 		return _compute_spawn_egress() + avoid_despawner
 
 	if feed_lock_remaining > 0.0:
 		behavior_state = BehaviorState.SCHOOL
 		feed_origin_valid = false
+		detritus_consume_progress = 0.0
 		return _compose_school_motion(delta) + avoid_despawner
 
 	if behavior_state == BehaviorState.FEED:
-		if energy >= starting_energy * feeding_energy_ratio or _is_inside_spawner_repel_zone(repel_zone_feed_margin):
+		if target_detritus == null or not is_instance_valid(target_detritus) or target_detritus.pending_remove:
 			behavior_state = BehaviorState.SCHOOL
 			feed_origin_valid = false
+			detritus_consume_progress = 0.0
+		elif energy >= starting_energy * feeding_energy_ratio or _is_inside_spawner_repel_zone(repel_zone_feed_margin):
+			behavior_state = BehaviorState.SCHOOL
+			feed_origin_valid = false
+			detritus_consume_progress = 0.0
 		else:
 			return _compose_feed_motion(delta) + avoid_despawner
 
-	if _is_near_shore() and not _is_inside_spawner_repel_zone(repel_zone_feed_margin) and randf() < feeding_chance_per_second * delta:
+	if target_detritus != null and _is_near_shore() and not _is_inside_spawner_repel_zone(repel_zone_feed_margin) and randf() < feeding_chance_per_second * delta:
 		behavior_state = BehaviorState.FEED
 		_begin_feeding_path()
+		_call_feeding_source(target_detritus.global_position)
 		return _compose_feed_motion(delta) + avoid_despawner
 
 	behavior_state = BehaviorState.SCHOOL
 	feed_origin_valid = false
+	detritus_consume_progress = 0.0
 	return _compose_school_motion(delta) + avoid_despawner
 
 
 func _can_trigger_panic() -> bool:
-	return panic_remaining <= 0.0 and panic_cooldown_remaining <= 0.0
+	return panic_remaining <= 0.0 and panic_cooldown_remaining <= 0.0 and energy >= burst_energy_cost
 
 
 func _begin_panic_from_flock_center() -> void:
@@ -254,6 +324,7 @@ func _begin_panic_from_flock_center() -> void:
 	panic_dir = flee_from_center.normalized()
 	panic_remaining = panic_duration_seconds
 	panic_cooldown_remaining = panic_cooldown_seconds
+	energy = maxf(0.0, energy - burst_energy_cost)
 
 
 func _compute_local_flock_center() -> Vector2:
@@ -325,10 +396,38 @@ func _begin_feeding_path() -> void:
 
 
 func _process_feeding(delta: float) -> void:
+	if not can_feed():
+		return
 	if behavior_state != BehaviorState.FEED:
 		return
+	if target_detritus == null or not is_instance_valid(target_detritus) or target_detritus.pending_remove:
+		return
+
+	if global_position.distance_to(target_detritus.global_position) > maxf(eat_radius, 1.0):
+		return
+
 	energy = minf(starting_energy, energy + feeding_energy_gain * delta)
-	points += feed_points_per_second * delta
+	detritus_consume_progress += delta
+	while detritus_consume_progress >= 1.0 and target_detritus != null and is_instance_valid(target_detritus):
+		detritus_consume_progress -= 1.0
+		if target_detritus.detritus_value <= 0:
+			target_detritus.pending_remove = true
+			FishPool.release(target_detritus)
+			target_detritus = null
+			break
+
+		target_detritus.set_detritus_value(target_detritus.detritus_value - 1)
+		detritus_units_consumed += 1
+		add_points(1)
+		mark_successful_feed(10.0)
+		visual_scale_multiplier *= 1.02
+		_refresh_scale()
+
+		if target_detritus.detritus_value <= 0:
+			target_detritus.pending_remove = true
+			FishPool.release(target_detritus)
+			target_detritus = null
+			break
 
 
 func _compute_wander(delta: float) -> Vector2:
@@ -349,19 +448,77 @@ func _compute_wander(delta: float) -> Vector2:
 func _compose_school_motion(delta: float) -> Vector2:
 	var base: Vector2 = _compute_wander(delta)
 	base += _compute_local_separation()
+	base += _compute_food_call_attraction()
 	base += _compute_depth_bias()
 	if _is_unstuck_active():
 		base += _compute_unstuck_escape()
 	return base
 
 
-func _compose_feed_motion(delta: float) -> Vector2:
-	var base: Vector2 = _compute_feeding_swim(delta)
+func _compose_feed_motion(_delta: float) -> Vector2:
+	if target_detritus == null or not is_instance_valid(target_detritus):
+		return Vector2.ZERO
+
+	var to_food: Vector2 = target_detritus.global_position - global_position
+	if to_food.length_squared() <= 0.000001:
+		return -velocity * 4.0
+
+	if to_food.length() > maxf(eat_radius, 1.0):
+		var desired_dir: Vector2 = to_food.normalized()
+		var desired: Vector2 = desired_dir * top_speed * 0.42 * _turn_speed_factor(desired_dir)
+		return _steer_towards(desired) * 1.7
+
+	var base: Vector2 = - velocity * 4.0
 	base += _compute_local_separation()
 	base += _compute_depth_bias()
 	if _is_unstuck_active():
 		base += _compute_unstuck_escape()
 	return base
+
+
+func has_active_feed_call() -> bool:
+	return feed_call_remaining > 0.0
+
+
+func get_feed_call_position() -> Vector2:
+	return feed_call_position
+
+
+func get_resource_refund_units() -> int:
+	return floori(float(detritus_units_consumed) / 2.0)
+
+
+func _call_feeding_source(source_position: Vector2) -> void:
+	feed_call_position = source_position
+	feed_call_remaining = 1.0
+	feeding_source_called.emit(source_position)
+
+
+func _compute_food_call_attraction() -> Vector2:
+	var nearest_call_pos: Vector2 = Vector2.ZERO
+	var nearest_call_dist: float = INF
+	var nearby: Array[Fish] = SpatialGrid.query_neighbors_by_species(global_position, vision_radius, SpeciesRegistry.SABALO)
+	for other: Fish in nearby:
+		if other == self or other.pending_remove or not is_instance_valid(other):
+			continue
+		if not (other is Sabalo):
+			continue
+		var caller: Sabalo = other as Sabalo
+		if not caller.has_active_feed_call():
+			continue
+		var dist: float = global_position.distance_to(caller.get_feed_call_position())
+		if dist < nearest_call_dist:
+			nearest_call_dist = dist
+			nearest_call_pos = caller.get_feed_call_position()
+
+	if nearest_call_dist == INF:
+		return Vector2.ZERO
+
+	var to_call: Vector2 = nearest_call_pos - global_position
+	if to_call.length_squared() <= 0.000001:
+		return Vector2.ZERO
+	var desired: Vector2 = to_call.normalized() * top_speed * 0.65
+	return _steer_towards(desired) * 1.1
 
 
 func _compute_depth_bias() -> Vector2:
@@ -647,3 +804,30 @@ func _draw() -> void:
 
 	if wander_heading.length_squared() > 0.000001:
 		draw_line(Vector2.ZERO, wander_heading.normalized() * 22.0, Color(0.88, 0.3, 1.0, 0.85), gizmo_line_width)
+
+	var font: Font = ThemeDB.fallback_font
+	if font == null:
+		return
+	var feed_state: String = "NONE"
+	if behavior_state == BehaviorState.FEED:
+		feed_state = "FEED"
+	elif behavior_state == BehaviorState.FLEE:
+		feed_state = "FLEE"
+	elif behavior_state == BehaviorState.DESCEND:
+		feed_state = "DESCEND"
+	elif spawn_egress_lock_remaining > 0.0:
+		feed_state = "EGRESS"
+	elif _is_unstuck_active():
+		feed_state = "UNSTUCK"
+	var status_line_1: String = "Sabalo Debug | state=%s | detritus_eaten=%d" % [feed_state, detritus_units_consumed]
+	var target_value: int = 0
+	if target_detritus != null and is_instance_valid(target_detritus) and not target_detritus.pending_remove:
+		target_value = target_detritus.detritus_value
+	var status_line_2: String = "target_detritus=%d | feed_lock=%.1fs | panic=%.1fs | age=%.2f" % [target_value, feed_lock_remaining, panic_remaining, _age_ratio()]
+	var status_line_3: String = "radii feed=%.0f vision=%.0f avoid=%.0f repel+margin=%.0f" % [feeding_start_distance, vision_radius, out_avoid_distance, spawner_repel_radius + repel_zone_feed_margin]
+	# Keep debug text upright even while the sabalo rotates.
+	draw_set_transform(Vector2(18.0, -36.0), -global_rotation, Vector2.ONE)
+	draw_string(font, Vector2.ZERO, status_line_1, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 13, Color(1.0, 1.0, 1.0, 0.96))
+	draw_string(font, Vector2(0.0, 14.0), status_line_2, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 12, Color(0.9, 0.98, 1.0, 0.94))
+	draw_string(font, Vector2(0.0, 28.0), status_line_3, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 12, Color(0.9, 0.95, 1.0, 0.92))
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)

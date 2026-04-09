@@ -5,24 +5,24 @@ const GUPPY: StringName = &"guppy"
 const SABALO: StringName = &"sabalo"
 const DIENTUDO: StringName = &"dientudo"
 const PELLET: StringName = &"pellet"
-const DEBRIS: StringName = &"debris"
+const DETRITUS: StringName = &"detritus"
 
 const DEFAULT_SPECIES: StringName = GUPPY
 const FISH_SPECIES_ORDER: Array[StringName] = [GUPPY, SABALO, DIENTUDO]
-const POOLED_SPECIES_ORDER: Array[StringName] = [GUPPY, SABALO, DIENTUDO, PELLET, DEBRIS]
+const POOLED_SPECIES_ORDER: Array[StringName] = [GUPPY, SABALO, DIENTUDO, PELLET, DETRITUS]
 
 const GUPPY_SCENE: PackedScene = preload("res://scenes/guppy.tscn")
 const SABALO_SCENE: PackedScene = preload("res://scenes/sabalo.tscn")
 const DIENTUDO_SCENE: PackedScene = preload("res://scenes/dientudo.tscn")
 const PELLET_SCENE: PackedScene = preload("res://scenes/pellet.tscn")
-const DEBRIS_SCENE: PackedScene = preload("res://scenes/debris.tscn")
+const DETRITUS_SCENE: PackedScene = preload("res://scenes/detritus.tscn")
 
 const SCENES: Dictionary = {
 	GUPPY: GUPPY_SCENE,
 	SABALO: SABALO_SCENE,
 	DIENTUDO: DIENTUDO_SCENE,
 	PELLET: PELLET_SCENE,
-	DEBRIS: DEBRIS_SCENE
+	DETRITUS: DETRITUS_SCENE
 }
 
 const DISPLAY_NAMES: Dictionary = {
@@ -30,7 +30,7 @@ const DISPLAY_NAMES: Dictionary = {
 	SABALO: "Sabalo",
 	DIENTUDO: "Dientudo",
 	PELLET: "Pellet",
-	DEBRIS: "Debris"
+	DETRITUS: "Detritus"
 }
 
 const TEXTURE_PATHS: Dictionary = {
@@ -38,15 +38,15 @@ const TEXTURE_PATHS: Dictionary = {
 	SABALO: "res://assets/sabalo.png",
 	DIENTUDO: "res://assets/dientudo.png",
 	PELLET: "res://assets/pellet.png",
-	DEBRIS: "res://assets/pellet.png"
+	DETRITUS: "res://assets/pellet.png"
 }
 
 const SPAWN_COSTS: Dictionary = {
-	GUPPY: 2,
+	GUPPY: 1,
 	SABALO: 4,
 	DIENTUDO: 8,
 	PELLET: 0,
-	DEBRIS: 0
+	DETRITUS: 0
 }
 
 const PREWARM_COUNTS: Dictionary = {
@@ -54,7 +54,7 @@ const PREWARM_COUNTS: Dictionary = {
 	SABALO: 10,
 	DIENTUDO: 5,
 	PELLET: 50,
-	DEBRIS: 20
+	DETRITUS: 20
 }
 
 
