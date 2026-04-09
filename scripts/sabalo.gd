@@ -1,6 +1,9 @@
 extends Fish
 class_name Sabalo
 
+## Detritus-feeding fish with custom flock panic, feed-call, and unstuck behavior.
+## Uses a custom acceleration state flow instead of Fish._update_behavior_state().
+
 signal feeding_source_called(source_position: Vector2)
 
 @export_group("Sabalo: Debug")
@@ -10,6 +13,7 @@ signal feeding_source_called(source_position: Vector2)
 @export var gizmo_line_width: float = 1.5
 
 var wander_heading: Vector2 = Vector2.RIGHT
+## Phase accumulator for feeding swim waveform.
 var feed_phase: float = 0.0
 @export_group("Sabalo: Feeding")
 ## Distance from shore used to trigger feeding opportunities.
@@ -21,15 +25,31 @@ var feed_phase: float = 0.0
 ## Energy gained each second while feeding.
 @export var feeding_energy_gain: float = 1.35
 ## Lockout duration before feeding is allowed after spawn/reset.
-@export var feed_lock_seconds: float = 8.0
+@export var feed_lock_seconds: float = 0.5
+## Minimum radius allowed for detritus consumption checks.
+@export var feeding_consume_radius: float = 12.0
+## Duration of social feed call broadcasts.
+@export var feed_call_signal_seconds: float = 2.4
+## Query multiplier used when scanning nearby sabalos for feed calls.
+@export var feed_call_query_radius_multiplier: float = 1.6
+## Steering strength toward nearby feed calls.
+@export var feed_call_attraction_strength: float = 1.95
 var feed_lock_remaining: float = 0.0
+## Position where current feed run began.
 var feed_origin: Vector2 = Vector2.ZERO
+## Escape direction picked when entering feeding motion.
 var feed_escape_dir: Vector2 = Vector2.ZERO
+## True when feed_origin/feed_escape_dir are initialized.
 var feed_origin_valid: bool = false
+## Current detritus target while in feed state.
 var target_detritus: Detritus = null
+## Seconds accumulated toward next detritus unit consume tick.
 var detritus_consume_progress: float = 0.0
+## Total detritus units consumed this lifecycle.
 var detritus_units_consumed: int = 0
+## Remaining broadcast time for social feed-call signal.
 var feed_call_remaining: float = 0.0
+## Last feed-call source position.
 var feed_call_position: Vector2 = Vector2.ZERO
 
 @export_group("Sabalo: Zone Handling")
@@ -61,7 +81,9 @@ var spawn_egress_lock_remaining: float = 0.0
 ## Strength multiplier for unstuck escape force.
 @export var unstuck_force_multiplier: float = 1.7
 var stalled_time: float = 0.0
+## Time remaining where unstuck escape steering is amplified.
 var unstuck_boost_remaining: float = 0.0
+## Keeps unstuck behavior active while still inside repel zone.
 var unstuck_zone_lock: bool = false
 
 @export_group("Sabalo: Steering")
@@ -85,9 +107,11 @@ var unstuck_zone_lock: bool = false
 @export var burst_energy_cost: float = 5.0
 var panic_remaining: float = 0.0
 var panic_cooldown_remaining: float = 0.0
+## Panic escape direction sampled at trigger time.
 var panic_dir: Vector2 = Vector2.ZERO
 
 
+## Sets species and initializes runtime debug/feed state.
 func _ready() -> void:
 	species = SpeciesDB.SABALO
 	super._ready()
@@ -97,6 +121,7 @@ func _ready() -> void:
 	queue_redraw()
 
 
+## Resets sabalo-specific runtime state when reused from pool.
 func reinitialize() -> void:
 	super.reinitialize()
 	debug_gizmo_enabled = false
@@ -120,11 +145,13 @@ func reinitialize() -> void:
 	queue_redraw()
 
 
+## Toggles debug draw overlays for this sabalo instance.
 func set_debug_focus(enabled: bool) -> void:
 	debug_gizmo_enabled = enabled
 	queue_redraw()
 
 
+## Updates timers before base processing and optional stall recovery debug redraw.
 func _process(delta: float) -> void:
 	feed_lock_remaining = maxf(0.0, feed_lock_remaining - delta)
 	feed_call_remaining = maxf(0.0, feed_call_remaining - delta)
@@ -138,6 +165,7 @@ func _process(delta: float) -> void:
 		queue_redraw()
 
 
+## Applies species database overrides for sabalo tuning knobs.
 func _apply_species_defaults() -> void:
 	super._apply_species_defaults()
 	var species_data: Dictionary = SpeciesDB.get_species(species)
@@ -146,6 +174,10 @@ func _apply_species_defaults() -> void:
 	feeding_energy_ratio = float(species_data.get("feeding_energy_ratio", feeding_energy_ratio))
 	feeding_energy_gain = float(species_data.get("feeding_energy_gain", feeding_energy_gain))
 	feed_lock_seconds = float(species_data.get("feed_lock_seconds", feed_lock_seconds))
+	feeding_consume_radius = float(species_data.get("feeding_consume_radius", feeding_consume_radius))
+	feed_call_signal_seconds = float(species_data.get("feed_call_signal_seconds", feed_call_signal_seconds))
+	feed_call_query_radius_multiplier = float(species_data.get("feed_call_query_radius_multiplier", feed_call_query_radius_multiplier))
+	feed_call_attraction_strength = float(species_data.get("feed_call_attraction_strength", feed_call_attraction_strength))
 	despawner_avoid_radius = float(species_data.get("despawner_avoid_radius", despawner_avoid_radius))
 	despawner_avoid_force_multiplier = float(species_data.get("despawner_avoid_force_multiplier", despawner_avoid_force_multiplier))
 	spawn_egress_lock_seconds = float(species_data.get("spawn_egress_lock_seconds", spawn_egress_lock_seconds))
@@ -168,6 +200,7 @@ func _apply_species_defaults() -> void:
 	burst_energy_cost = float(species_data.get("burst_energy_cost", burst_energy_cost))
 
 
+## Rotates sprite toward movement with optional panic turn boost.
 func _update_orientation() -> void:
 	if not _ensure_sprite():
 		return
@@ -185,6 +218,7 @@ func _update_orientation() -> void:
 	previous_global_position = global_position
 
 
+## Returns turn-speed attenuation for sharp direction changes.
 func _turn_speed_factor(desired_dir: Vector2) -> float:
 	if desired_dir.length_squared() <= 0.000001:
 		return 1.0
@@ -197,6 +231,7 @@ func _turn_speed_factor(desired_dir: Vector2) -> float:
 	return lerpf(1.0, turn_slow_min_speed_factor, pow(t, 0.75))
 
 
+## Refreshes predator and detritus targets using spatial queries.
 func _update_context() -> void:
 	boid_neighbors.clear()
 	nearest_predator = null
@@ -246,20 +281,22 @@ func _update_context() -> void:
 		detritus_consume_progress = 0.0
 
 
+## Sabalo uses a custom state flow inside _compute_acceleration.
 func _update_behavior_state() -> void:
 	# Sabalo uses a custom state machine inside _compute_acceleration.
 	pass
 
 
+## Computes sabalo acceleration across descend/flee/egress/feed/school branches.
 func _compute_acceleration(delta: float) -> Vector2:
 	var avoid_despawner: Vector2 = _compute_despawner_avoidance()
 	if not can_feed():
 		behavior_state = BehaviorState.DESCEND
 		feed_origin_valid = false
 		detritus_consume_progress = 0.0
-		# Descend should bias navigation, not override it like a hard tractor pull.
-		var descend_bias: Vector2 = _compute_despawn_bias() * 0.62
-		var drift_motion: Vector2 = _compose_school_motion(delta) * 0.58
+		# Match guppy-style exits: smooth age ramp plus fish-like glide.
+		var descend_bias: Vector2 = _compute_guppy_style_age_despawn_bias(1.3)
+		var drift_motion: Vector2 = _compose_exit_motion(delta) * 0.7
 		return drift_motion + descend_bias + avoid_despawner
 	if _predator_valid():
 		if _can_trigger_panic():
@@ -291,14 +328,14 @@ func _compute_acceleration(delta: float) -> Vector2:
 			behavior_state = BehaviorState.SCHOOL
 			feed_origin_valid = false
 			detritus_consume_progress = 0.0
-		elif energy >= starting_energy * feeding_energy_ratio or _is_inside_spawner_repel_zone(repel_zone_feed_margin):
+		elif _is_inside_spawner_repel_zone(repel_zone_feed_margin):
 			behavior_state = BehaviorState.SCHOOL
 			feed_origin_valid = false
 			detritus_consume_progress = 0.0
 		else:
 			return _compose_feed_motion(delta) + avoid_despawner
 
-	if target_detritus != null and _is_near_shore() and not _is_inside_spawner_repel_zone(repel_zone_feed_margin) and randf() < feeding_chance_per_second * delta:
+	if target_detritus != null and not _is_inside_spawner_repel_zone(repel_zone_feed_margin):
 		behavior_state = BehaviorState.FEED
 		_begin_feeding_path()
 		_call_feeding_source(target_detritus.global_position)
@@ -310,10 +347,12 @@ func _compute_acceleration(delta: float) -> Vector2:
 	return _compose_school_motion(delta) + avoid_despawner
 
 
+## Returns true when panic trigger gates allow a burst.
 func _can_trigger_panic() -> bool:
 	return panic_remaining <= 0.0 and panic_cooldown_remaining <= 0.0 and energy >= burst_energy_cost
 
 
+## Initializes panic direction and consumes burst energy.
 func _begin_panic_from_flock_center() -> void:
 	var flock_center: Vector2 = _compute_local_flock_center()
 	var flee_from_center: Vector2 = global_position - flock_center
@@ -327,6 +366,7 @@ func _begin_panic_from_flock_center() -> void:
 	energy = maxf(0.0, energy - burst_energy_cost)
 
 
+## Computes centroid of nearby sabalo flock for panic direction seeding.
 func _compute_local_flock_center() -> Vector2:
 	var nearby: Array[Fish] = SpatialGrid.query_neighbors(global_position, local_separation_radius * 2.0)
 	var center: Vector2 = global_position
@@ -341,6 +381,7 @@ func _compute_local_flock_center() -> Vector2:
 	return center / float(count)
 
 
+## Produces burst escape steering while avoiding shoreline trapping.
 func _compute_panic_escape() -> Vector2:
 	var desired_dir: Vector2 = panic_dir
 	if desired_dir.length_squared() <= 0.000001:
@@ -360,25 +401,12 @@ func _compute_panic_escape() -> Vector2:
 	return _steer_towards(desired) * 3.2
 
 
+## Reuses guppy-style youth despawner avoidance with sabalo tuning.
 func _compute_despawner_avoidance() -> Vector2:
-	var ratio: float = _age_ratio()
-	if ratio >= 0.75:
-		return Vector2.ZERO
-
-	var away: Vector2 = global_position - despawn_area_center
-	var distance: float = away.length()
-	if distance >= despawner_avoid_radius:
-		return Vector2.ZERO
-	if away.length_squared() <= 0.000001:
-		away = Vector2.RIGHT.rotated(randf_range(-PI, PI))
-
-	var strength: float = 1.0 - clampf(distance / max(despawner_avoid_radius, 0.0001), 0.0, 1.0)
-	var youth_t: float = 1.0 - clampf(ratio / 0.75, 0.0, 1.0)
-	var desired: Vector2 = away.normalized() * top_speed
-	var young_boost: float = 1.0 + youth_t * 0.22
-	return _steer_towards(desired) * (despawner_avoid_force_multiplier * young_boost * (0.45 + strength * 1.55))
+	return _compute_guppy_style_despawner_avoidance(despawner_avoid_radius, despawner_avoid_force_multiplier, 0.22)
 
 
+## Captures starting data for the current feed path and escape axis.
 func _begin_feeding_path() -> void:
 	feed_origin = global_position
 	feed_origin_valid = true
@@ -395,6 +423,7 @@ func _begin_feeding_path() -> void:
 		feed_escape_dir = Vector2.RIGHT.rotated(randf_range(-PI, PI))
 
 
+## Consumes detritus units over time when in-range during FEED state.
 func _process_feeding(delta: float) -> void:
 	if not can_feed():
 		return
@@ -403,7 +432,7 @@ func _process_feeding(delta: float) -> void:
 	if target_detritus == null or not is_instance_valid(target_detritus) or target_detritus.pending_remove:
 		return
 
-	if global_position.distance_to(target_detritus.global_position) > maxf(eat_radius, 1.0):
+	if global_position.distance_to(target_detritus.global_position) > maxf(eat_radius, feeding_consume_radius):
 		return
 
 	energy = minf(starting_energy, energy + feeding_energy_gain * delta)
@@ -463,7 +492,7 @@ func _compose_feed_motion(_delta: float) -> Vector2:
 	if to_food.length_squared() <= 0.000001:
 		return -velocity * 4.0
 
-	if to_food.length() > maxf(eat_radius, 1.0):
+	if to_food.length() > maxf(eat_radius, feeding_consume_radius):
 		var desired_dir: Vector2 = to_food.normalized()
 		var desired: Vector2 = desired_dir * top_speed * 0.42 * _turn_speed_factor(desired_dir)
 		return _steer_towards(desired) * 1.7
@@ -490,14 +519,15 @@ func get_resource_refund_units() -> int:
 
 func _call_feeding_source(source_position: Vector2) -> void:
 	feed_call_position = source_position
-	feed_call_remaining = 1.0
+	feed_call_remaining = feed_call_signal_seconds
 	feeding_source_called.emit(source_position)
 
 
 func _compute_food_call_attraction() -> Vector2:
 	var nearest_call_pos: Vector2 = Vector2.ZERO
 	var nearest_call_dist: float = INF
-	var nearby: Array[Fish] = SpatialGrid.query_neighbors_by_species(global_position, vision_radius, SpeciesRegistry.SABALO)
+	var call_query_radius: float = maxf(vision_radius * feed_call_query_radius_multiplier, vision_radius)
+	var nearby: Array[Fish] = SpatialGrid.query_neighbors_by_species(global_position, call_query_radius, SpeciesRegistry.SABALO)
 	for other: Fish in nearby:
 		if other == self or other.pending_remove or not is_instance_valid(other):
 			continue
@@ -518,7 +548,16 @@ func _compute_food_call_attraction() -> Vector2:
 	if to_call.length_squared() <= 0.000001:
 		return Vector2.ZERO
 	var desired: Vector2 = to_call.normalized() * top_speed * 0.65
-	return _steer_towards(desired) * 1.1
+	return _steer_towards(desired) * feed_call_attraction_strength
+
+
+func _compose_exit_motion(delta: float) -> Vector2:
+	var base: Vector2 = _compute_wander(delta)
+	base += _compute_local_separation()
+	base += _compute_depth_bias()
+	if _is_unstuck_active():
+		base += _compute_unstuck_escape()
+	return base
 
 
 func _compute_depth_bias() -> Vector2:

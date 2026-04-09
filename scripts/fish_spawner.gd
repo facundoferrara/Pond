@@ -1,13 +1,26 @@
 extends Node2D
 class_name FishSpawner
 
+@export_group("Spawner Identity")
+## Owning player id for this spawner.
 @export_range(1, 2) var player_id: int = 1
+## Max random offset from spawner origin for each spawn (px).
 @export var spawn_jitter_radius: float = 30.0
-@export var repel_radius: float = 340.0
+## Radius around the spawner that pushes fish outward (px).
+@export var repel_radius: float = 238.0
+## Steering multiplier for spawner repulsion.
 @export var repel_force_multiplier: float = 1.8
+
+@export_group("Spawner RNG")
+## Enables deterministic spawn rolls for repeatable playtests.
 @export var use_fixed_seed: bool = false
+## Seed used when fixed RNG mode is enabled.
 @export var fixed_seed: int = 1
+
+@export_group("Spawner Allocation")
+## Deficit-correction gain for strategy allocation weights.
 @export_range(0.0, 2.0, 0.01) var allocation_correction_strength: float = 0.7
+## Floor ratio that keeps each target species from being starved.
 @export_range(0.0, 1.0, 0.01) var min_target_retention_ratio: float = 0.2
 
 const RESOURCE_MAX: float = 100.0
@@ -34,6 +47,7 @@ var _rng: RandomNumberGenerator = RandomNumberGenerator.new()
 signal species_changed(pid: int, species: StringName)
 
 
+## Initializes deterministic or randomized spawning RNG and tracking tables.
 func _ready() -> void:
 	add_to_group("fish_spawners")
 	if use_fixed_seed:
@@ -43,6 +57,7 @@ func _ready() -> void:
 	_initialize_species_tracking()
 
 
+## Advances resource regen and queues spawns when cooldown/resources allow.
 func advance(delta: float) -> void:
 	resources = minf(RESOURCE_MAX, resources + RESOURCE_REGEN * delta)
 	_cooldown = maxf(0.0, _cooldown - delta)
@@ -50,6 +65,7 @@ func advance(delta: float) -> void:
 		_try_queue_spawn()
 
 
+## Reserves resources and marks a spawn payload ready for consumption.
 func _try_queue_spawn() -> void:
 	var cost: int = FishSpawner.species_cost(selected_species)
 	if resources < float(cost):
@@ -65,6 +81,7 @@ func _try_queue_spawn() -> void:
 	_roll_species()
 
 
+## Chooses next species from strategy weights with deficit correction.
 func _roll_species() -> void:
 	var species_list: Array[StringName] = SpeciesRegistry.all_species()
 	if species_list.is_empty():
@@ -115,28 +132,32 @@ func _roll_species() -> void:
 	species_changed.emit(player_id, selected_species)
 
 
+## Applies strategy weights used by _roll_species().
 func configure_strategy(strategy_label: String, weights: Dictionary) -> void:
 	strategy_name = strategy_label
 	strategy = weights.duplicate()
 	_roll_species()
 
 
+## Returns true when a spawn payload has been queued this frame window.
 func can_spawn(_current_count: int) -> bool:
 	return _spawn_ready
 
 
+## Adds resources instantly (used by detritus refund mechanics).
 func add_resource(amount: float) -> void:
 	if amount <= 0.0:
 		return
 	resources = minf(RESOURCE_MAX, resources + amount)
 
 
+## Returns a queued spawn request payload consumed by Zoo.
 func consume_spawn_request() -> Dictionary:
 	_spawn_ready = false
 	spawns_by_species[_queued_species] = int(spawns_by_species.get(_queued_species, 0)) + 1
 	var jitter: Vector2 = Vector2(
-		randf_range(-spawn_jitter_radius, spawn_jitter_radius),
-		randf_range(-spawn_jitter_radius, spawn_jitter_radius)
+		_rng.randf_range(-spawn_jitter_radius, spawn_jitter_radius),
+		_rng.randf_range(-spawn_jitter_radius, spawn_jitter_radius)
 	)
 	return {
 		"species": _queued_species,
@@ -146,6 +167,7 @@ func consume_spawn_request() -> Dictionary:
 	}
 
 
+## Clears runtime spawn state between matches.
 func reset() -> void:
 	resources = 0.0
 	_queued_species = SpeciesRegistry.DEFAULT_SPECIES

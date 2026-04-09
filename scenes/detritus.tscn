@@ -1,17 +1,20 @@
 [gd_scene format=3 uid="uid://csl30jnhdsc7v"]
 
-[ext_resource type="Script" path="res://scripts/detritus.gd" id="1_jv780"]
+[ext_resource type="Script" uid="uid://35wp7x3kmfk8" path="res://scripts/detritus.gd" id="1_jv780"]
 [ext_resource type="Texture2D" uid="uid://c1cgg4q5l4vya" path="res://assets/pellet.png" id="1_texture"]
 
 [sub_resource type="CircleShape2D" id="CircleShape2D_3j7el"]
 
 [node name="Detritus" type="Node2D" unique_id=1511599220]
 script = ExtResource("1_jv780")
+species = &"detritus"
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1064355188]
+scale = Vector2(0.10062162, 0.10062162)
 texture = ExtResource("1_texture")
 
 [node name="body" type="Area2D" parent="." unique_id=1386924790]
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="body" unique_id=1139825043]
+scale = Vector2(2.2800007, 2.2800007)
 shape = SubResource("CircleShape2D_3j7el")

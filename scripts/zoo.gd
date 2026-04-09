@@ -1,5 +1,8 @@
 extends Node2D
 
+## Main match orchestrator.
+## Owns scene wiring, spawn loop, scoring, analytics, and per-frame SpatialGrid rebuild.
+
 enum ScheduleMode {
 	ROUND_ROBIN,
 	FOCUSED_SUITE
@@ -8,6 +11,7 @@ enum ScheduleMode {
 @onready var pond: Node2D = $Pond
 @onready var pond_shape: Polygon2D = $PondShape
 @onready var out_boundary: Line2D = $OutBoundary
+@onready var out_boundary_debug: Line2D = $OutBoundaryDebug
 @onready var despawn_area: Polygon2D = $DespawnAreas/DespawnArea
 @onready var score_p1_label: Label = $CanvasLayer/ScoreP1
 @onready var score_p2_label: Label = $CanvasLayer/ScoreP2
@@ -18,13 +22,34 @@ enum ScheduleMode {
 @onready var _btn_rr: Button = $CanvasLayer/ModeOverlay/BtnRoundRobin
 @onready var _btn_fs: Button = $CanvasLayer/ModeOverlay/BtnFocusedSuite
 
+@export_group("Zoo: Boundary")
+## Contact distance used to reinsert fish inside the out boundary.
 @export var out_boundary_touch_distance: float = 10.0
+## Avoidance distance where boundary steering begins.
 @export var out_boundary_avoid_distance: float = 140.0
+## Draws OutBoundaryDebug overlay when true.
+@export var debug_draw_out_boundary: bool = false
+
+@export_group("Zoo: Despawn")
+## Enables despawn polygon checks in the main loop.
 @export var despawn_areas_enabled: bool = true
+## Initial detritus units spawned at round start.
 @export var startup_detritus_count: int = 20
+## Required edge clearance for detritus spawn validity.
+@export var detritus_min_edge_clearance_px: float = 50.0
+## Number of retries when resolving valid detritus spawn points.
+@export var detritus_spawn_max_attempts: int = 128
+
+@export_group("Zoo: Pellet")
+## Target live pellet population while match is active.
 @export var pellet_target_count: int = 40
+## Delay between pellet spawn checks when under target count.
 @export var pellet_spawn_interval_seconds: float = 0.35
+
+@export_group("Zoo: Match")
+## Number of laps used in round-robin scheduling mode.
 @export_range(1, 20) var round_robin_laps: int = 3
+## Lead threshold required to end a match.
 @export_range(1, 100) var win_lead_points: int = 12
 
 var pond_bounds: Rect2
@@ -91,11 +116,11 @@ var _predated_deaths_by_player_species: Dictionary = {}
 var _fish_lifecycle_by_id: Dictionary = {}
 var _awaiting_mode_selection: bool = true
 var _pellet_spawn_timer: float = 0.0
-var _debug_sabalo_fish_id: int = 0
-var _debug_sabalo_pending_handoff: bool = true
 
 
+## Initializes runtime systems, caches geometry, builds HUD, and waits for mode selection.
 func _ready() -> void:
+	_validate_scene_wiring()
 	randomize()
 	_initialize_ai_profiles()
 	_species_order = SpeciesRegistry.all_species()
@@ -107,12 +132,28 @@ func _ready() -> void:
 	_build_out_boundary_polygon()
 	_build_despawn_polygon_cache()
 	_setup_hud()
+	if out_boundary != null:
+		out_boundary.visible = false
+	if out_boundary_debug != null:
+		out_boundary_debug.visible = debug_draw_out_boundary
 	# Keep panel from hard-blocking while still allowing child buttons to be pickable.
 	_mode_overlay_node.mouse_filter = Control.MOUSE_FILTER_PASS
 	_btn_rr.pressed.connect(_begin_selected_mode.bind(ScheduleMode.ROUND_ROBIN))
 	_btn_fs.pressed.connect(_begin_selected_mode.bind(ScheduleMode.FOCUSED_SUITE))
 
 
+## Fails fast when critical Zoo scene dependencies are missing.
+func _validate_scene_wiring() -> void:
+	assert(pond != null, "Zoo scene missing Pond node")
+	assert(pond_shape != null, "Zoo scene missing PondShape node")
+	assert(despawn_area != null, "Zoo scene missing DespawnArea node")
+	assert(score_p1_label != null and score_p2_label != null and count_label != null, "Zoo scene missing HUD labels")
+	assert(spawner_p1 != null and spawner_p2 != null, "Zoo scene missing spawners")
+	if get_node_or_null("/root/SpatialGrid") == null:
+		push_warning("Zoo expects SpatialGrid autoload to be configured.")
+
+
+## Starts selected schedule mode and boots first match.
 func _begin_selected_mode(mode: ScheduleMode) -> void:
 	if not _awaiting_mode_selection:
 		return
@@ -130,6 +171,7 @@ func _begin_selected_mode(mode: ScheduleMode) -> void:
 	_start_match()
 
 
+## Keyboard shortcut handling for mode selection overlay.
 func _input(event: InputEvent) -> void:
 	if not _awaiting_mode_selection:
 		return
@@ -146,6 +188,7 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
+## Main loop: rebuild grid, run match systems, or advance reset timer.
 func _process(delta: float) -> void:
 	if _awaiting_mode_selection:
 		if Input.is_key_pressed(KEY_1) or Input.is_physical_key_pressed(KEY_1) or Input.is_key_pressed(KEY_KP_1):
@@ -170,6 +213,7 @@ func _process(delta: float) -> void:
 	_update_hud()
 
 
+## Advances one spawner and consumes queued spawn payloads.
 func _handle_spawner(delta: float, spawner: Node2D) -> void:
 	if spawner == null:
 		return
@@ -181,6 +225,7 @@ func _handle_spawner(delta: float, spawner: Node2D) -> void:
 		_spawn_fish(spawner.call("consume_spawn_request") as Dictionary)
 
 
+## Acquires, configures, and registers a new fish from a spawn request payload.
 func _spawn_fish(fish_data: Dictionary) -> void:
 	var species_name: StringName = fish_data.get("species", SpeciesRegistry.DEFAULT_SPECIES) as StringName
 	var normalized_species: StringName = SpeciesRegistry.normalize_species(species_name)
@@ -222,13 +267,6 @@ func _spawn_fish(fish_data: Dictionary) -> void:
 		var predator: Dientudo = fish as Dientudo
 		if not predator.prey_predated.is_connected(_on_prey_predated):
 			predator.prey_predated.connect(_on_prey_predated)
-	if fish is Sabalo:
-		var sabalo: Sabalo = fish as Sabalo
-		var should_debug: bool = _debug_sabalo_pending_handoff
-		sabalo.set_debug_focus(should_debug)
-		if should_debug:
-			_debug_sabalo_pending_handoff = false
-			_debug_sabalo_fish_id = fish.get_instance_id()
 	SpatialGrid.register_fish(fish)
 	if player_id == 1:
 		_spawns_p1[normalized_species] = int(_spawns_p1.get(normalized_species, 0)) + 1
@@ -239,6 +277,7 @@ func _spawn_fish(fish_data: Dictionary) -> void:
 	_record_spawn_sequence_event(player_id, normalized_species)
 
 
+## Returns centroid of the despawn polygon in global space.
 func _compute_despawn_center() -> Vector2:
 	if despawn_area == null or despawn_area.polygon.size() < 3:
 		return Vector2(640.0, 900.0)
@@ -248,8 +287,12 @@ func _compute_despawn_center() -> Vector2:
 	return accum / float(despawn_area.polygon.size())
 
 
+## Spawns detritus with validity checks and initial value units.
 func _spawn_detritus(spawn_position: Vector2, detritus_units: int) -> void:
 	if detritus_units <= 0:
+		return
+	var safe_spawn_position: Vector2 = _resolve_detritus_spawn_point(spawn_position)
+	if not _is_detritus_spawn_valid(safe_spawn_position):
 		return
 	var detritus_fish: Fish = FishPool.acquire(SpeciesRegistry.DETRITUS)
 	if detritus_fish == null:
@@ -258,7 +301,7 @@ func _spawn_detritus(spawn_position: Vector2, detritus_units: int) -> void:
 	detritus_fish.reparent(pond)
 	detritus_fish.show()
 	detritus_fish.set_process(true)
-	detritus_fish.position = spawn_position
+	detritus_fish.position = safe_spawn_position
 	detritus_fish.configure_from_zoo(SpeciesRegistry.DETRITUS, 1, Color(0.45, 0.30, 0.14, 1.0), pond_bounds)
 	detritus_fish.reinitialize()
 	detritus_fish.configure_out_boundary(out_boundary_polygon, out_boundary_touch_distance, out_boundary_avoid_distance)
@@ -269,6 +312,7 @@ func _spawn_detritus(spawn_position: Vector2, detritus_units: int) -> void:
 	SpatialGrid.register_fish(detritus_fish)
 
 
+## Spawns and registers a pellet entity at the requested position.
 func _spawn_pellet(spawn_position: Vector2) -> void:
 	var pellet: Fish = FishPool.acquire(SpeciesRegistry.PELLET)
 	if pellet == null:
@@ -286,11 +330,13 @@ func _spawn_pellet(spawn_position: Vector2) -> void:
 	SpatialGrid.register_fish(pellet)
 
 
+## Seeds pellets up to the configured startup target.
 func _seed_startup_pellets() -> void:
 	for _i: int in range(maxi(pellet_target_count, 0)):
 		_spawn_pellet(_random_point_in_pond())
 
 
+## Maintains pellet population around pellet_target_count.
 func _process_pellet_spawning(delta: float) -> void:
 	if pellet_target_count <= 0:
 		return
@@ -313,6 +359,7 @@ func _process_pellet_spawning(delta: float) -> void:
 		_pellet_spawn_timer = 0.25
 
 
+## Seeds startup detritus and prints a one-line spawn sanity sample.
 func _seed_startup_detritus() -> void:
 	var requested: int = maxi(startup_detritus_count, 0)
 	for _i: int in range(requested):
@@ -332,6 +379,7 @@ func _seed_startup_detritus() -> void:
 	print("Zoo: startup detritus requested=%d live_now=%d sample_alpha=%.2f" % [requested, live_now, sample_alpha])
 
 
+## Returns a random in-pond point that excludes despawn polygon when possible.
 func _random_point_in_pond_outside_despawn() -> Vector2:
 	if _despawn_polygon_cached.size() < 3:
 		return _random_point_in_pond()
@@ -342,6 +390,60 @@ func _random_point_in_pond_outside_despawn() -> Vector2:
 	return _random_point_in_pond()
 
 
+## Attempts to relocate invalid detritus spawns to a safe in-pond point.
+func _resolve_detritus_spawn_point(preferred: Vector2) -> Vector2:
+	if _is_detritus_spawn_valid(preferred):
+		return preferred
+
+	for _attempt: int in range(maxi(detritus_spawn_max_attempts, 1)):
+		var candidate: Vector2 = _random_point_in_pond_outside_despawn()
+		if _is_detritus_spawn_valid(candidate):
+			return candidate
+
+	return preferred
+
+
+## Validates detritus spawn points against pond bounds, edge clearance, and spawner repel zones.
+func _is_detritus_spawn_valid(point: Vector2) -> bool:
+	if out_boundary_polygon.size() >= 3 and not Geometry2D.is_point_in_polygon(point, out_boundary_polygon):
+		return false
+
+	if _distance_to_out_boundary(point) < maxf(detritus_min_edge_clearance_px, 0.0):
+		return false
+
+	for node: Node in get_tree().get_nodes_in_group("fish_spawners"):
+		if not (node is Node2D):
+			continue
+		var spawner_node: Node2D = node as Node2D
+		var repel_radius: float = float(spawner_node.get("repel_radius"))
+		if repel_radius <= 0.0:
+			repel_radius = 238.0
+		if point.distance_to(spawner_node.global_position) <= repel_radius:
+			return false
+
+	return true
+
+
+## Returns shortest distance from a point to the out-boundary polyline.
+func _distance_to_out_boundary(point: Vector2) -> float:
+	if out_boundary_polygon.size() < 2:
+		var left: float = point.x - pond_bounds.position.x
+		var right: float = pond_bounds.end.x - point.x
+		var top: float = point.y - pond_bounds.position.y
+		var bottom: float = pond_bounds.end.y - point.y
+		return minf(minf(left, right), minf(top, bottom))
+
+	var nearest_distance: float = INF
+	for i: int in range(out_boundary_polygon.size()):
+		var a: Vector2 = out_boundary_polygon[i]
+		var b: Vector2 = out_boundary_polygon[(i + 1) % out_boundary_polygon.size()]
+		var closest: Vector2 = Geometry2D.get_closest_point_to_segment(point, a, b)
+		nearest_distance = minf(nearest_distance, point.distance_to(closest))
+
+	return nearest_distance
+
+
+## Counts live fish by species, skipping pending removals.
 func _count_live_species(species_name: StringName) -> int:
 	var total: int = 0
 	for child: Node in pond.get_children():
@@ -355,6 +457,7 @@ func _count_live_species(species_name: StringName) -> int:
 	return total
 
 
+## Picks a random point inside pond polygon (or viewport bounds fallback).
 func _random_point_in_pond() -> Vector2:
 	if out_boundary_polygon.size() < 3:
 		return Vector2(
@@ -380,6 +483,7 @@ func _random_point_in_pond() -> Vector2:
 	return out_boundary_polygon[randi() % out_boundary_polygon.size()]
 
 
+## Handles predation analytics and optional detritus generation from consumed prey.
 func _on_prey_predated(prey_position: Vector2, prey_weight_g: float, predator_player: int, prey_player: int, prey_species: StringName, prey_fish_id: int, prey_feed_count: int) -> void:
 	if predator_player == 1 or predator_player == 2:
 		_predations_by_player[predator_player] = int(_predations_by_player.get(predator_player, 0)) + 1
@@ -390,14 +494,12 @@ func _on_prey_predated(prey_position: Vector2, prey_weight_g: float, predator_pl
 			prey_entry["predated"] = true
 			prey_entry["feeds"] = maxi(int(prey_entry.get("feeds", 0)), prey_feed_count)
 			_fish_lifecycle_by_id[prey_fish_id] = prey_entry
-	if prey_species == SpeciesRegistry.SABALO and prey_fish_id == _debug_sabalo_fish_id:
-		_debug_sabalo_fish_id = 0
-		_debug_sabalo_pending_handoff = true
 	var detritus_units: int = _roll_predation_detritus_value(prey_weight_g)
 	if detritus_units > 0:
 		_spawn_detritus(prey_position, detritus_units)
 
 
+## Converts prey biomass to probabilistic detritus units.
 func _roll_predation_detritus_value(prey_weight_g: float) -> int:
 	var roll_count: int = int(floor(prey_weight_g / 50.0))
 	if roll_count <= 0:
@@ -409,6 +511,7 @@ func _roll_predation_detritus_value(prey_weight_g: float) -> int:
 	return detritus_units
 
 
+## Builds and caches world-space out boundary polygon from PondShape.
 func _build_out_boundary_polygon() -> void:
 	if pond_shape == null or pond_shape.polygon.size() < 3:
 		out_boundary_polygon = PackedVector2Array([
@@ -427,8 +530,12 @@ func _build_out_boundary_polygon() -> void:
 
 	if out_boundary != null:
 		out_boundary.points = out_boundary_polygon
+	if out_boundary_debug != null:
+		out_boundary_debug.points = out_boundary_polygon
+		out_boundary_debug.visible = debug_draw_out_boundary
 
 
+## Caches despawn polygon in world space for fast point-in-polygon checks.
 func _build_despawn_polygon_cache() -> void:
 	if despawn_area == null or despawn_area.polygon.size() < 3:
 		return
@@ -437,6 +544,7 @@ func _build_despawn_polygon_cache() -> void:
 		_despawn_polygon_cached.append(despawn_area.to_global(local_point))
 
 
+## Returns player-specific tint for spawned species.
 func _pick_species_tint(species_name: StringName, player_id: int) -> Color:
 	if species_name == SpeciesRegistry.GUPPY:
 		if player_id == 1:
@@ -459,12 +567,10 @@ func _pick_species_tint(species_name: StringName, player_id: int) -> Color:
 	return Color(1.0, 1.0, 1.0, 1.0)
 
 
+## Applies score/biomass accounting when fish exits alive.
 func _on_fish_exited(player_id: int, point_value: int, redeemed_biomass_g: float, fish_id: int, fish_species: StringName, feed_count: int) -> void:
 	if player_id != 1 and player_id != 2:
 		return
-	if fish_species == SpeciesRegistry.SABALO and fish_id == _debug_sabalo_fish_id:
-		_debug_sabalo_fish_id = 0
-		_debug_sabalo_pending_handoff = true
 	score_by_player[player_id] = float(score_by_player.get(player_id, 0.0)) + float(point_value)
 	_redeemed_biomass_by_player[player_id] = float(_redeemed_biomass_by_player.get(player_id, 0.0)) + redeemed_biomass_g
 	_register_alive_exit(player_id, fish_species, feed_count)
@@ -475,6 +581,7 @@ func _on_fish_exited(player_id: int, point_value: int, redeemed_biomass_g: float
 		_fish_lifecycle_by_id[fish_id] = fish_entry
 
 
+## Tracks successful feed analytics by player/species.
 func _on_fish_feed_succeeded(player_id: int, fish_species: StringName, fish_id: int, feed_count: int) -> void:
 	if player_id != 1 and player_id != 2:
 		return
@@ -486,6 +593,7 @@ func _on_fish_feed_succeeded(player_id: int, fish_species: StringName, fish_id: 
 		_fish_lifecycle_by_id[fish_id] = fish_entry
 
 
+## Despawns fish that enter configured despawn polygons.
 func _process_despawn_areas() -> void:
 	if not despawn_areas_enabled:
 		return
@@ -504,6 +612,7 @@ func _process_despawn_areas() -> void:
 			_despawn_and_tally(fish)
 
 
+## Applies despawn scoring side effects and returns fish to pool.
 func _despawn_and_tally(fish: Fish) -> void:
 	if fish.pending_remove:
 		return
@@ -515,9 +624,6 @@ func _despawn_and_tally(fish: Fish) -> void:
 		var refund_units: int = sabalo.get_resource_refund_units()
 		if refund_units > 0:
 			_grant_resource_bonus(fish.player, float(refund_units))
-		if fish.get_instance_id() == _debug_sabalo_fish_id:
-			_debug_sabalo_fish_id = 0
-			_debug_sabalo_pending_handoff = true
 
 	score_by_player[fish.player] = float(score_by_player.get(fish.player, 0.0)) + float(fish.get_point_value())
 	_redeemed_biomass_by_player[fish.player] = float(_redeemed_biomass_by_player.get(fish.player, 0.0)) + fish.get_redeemable_biomass_g()
@@ -525,6 +631,7 @@ func _despawn_and_tally(fish: Fish) -> void:
 	FishPool.release(fish)
 
 
+## Grants immediate resource bonus to the owning spawner.
 func _grant_resource_bonus(player_id: int, amount: float) -> void:
 	if amount <= 0.0:
 		return
@@ -535,6 +642,7 @@ func _grant_resource_bonus(player_id: int, amount: float) -> void:
 		target_spawner.call("add_resource", amount)
 
 
+## Counts currently live non-detritus fish.
 func _live_fish_count() -> int:
 	var total: int = 0
 	for child: Node in pond.get_children():
@@ -546,6 +654,7 @@ func _live_fish_count() -> int:
 	return total
 
 
+## Counts live non-detritus fish spawned by one spawner.
 func _live_fish_count_from_spawner(spawner: Node2D) -> int:
 	var total: int = 0
 	var spawner_path: NodePath = spawner.get_path()
@@ -560,6 +669,7 @@ func _live_fish_count_from_spawner(spawner: Node2D) -> int:
 	return total
 
 
+## Updates top-line match UI labels (scores, count, lap, lead).
 func _update_ui() -> void:
 	var p1_score: int = int(round(float(score_by_player.get(1, 0.0))))
 	var p2_score: int = int(round(float(score_by_player.get(2, 0.0))))
@@ -572,12 +682,13 @@ func _update_ui() -> void:
 	count_label.text = "GAME %d/%d  LAP %d  |  %s vs %s  |  FISH %d  |  LEAD %d/%d pts" % [_game_id + 1, _schedule.size(), lap, _p1_ai_name, _p2_ai_name, _live_fish_count(), lead, win_lead_points]
 
 
+## Builds and styles HUD widgets for scores, species slots, diagnostics, and winner banner.
 func _setup_hud() -> void:
 	var cl: CanvasLayer = $CanvasLayer
 	var vp_w: float = get_viewport_rect().size.x
 	var vp_h: float = get_viewport_rect().size.y
 
-	score_p1_label.position = Vector2(vp_w * 0.5 - 430.0, vp_h - 148.0)
+	score_p1_label.position = Vector2(vp_w * 0.5 - 430.0, 14.0)
 	score_p1_label.size = Vector2(320.0, 34.0)
 	score_p1_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	score_p1_label.add_theme_color_override("font_color", Color(0.58, 0.88, 1.0, 1.0))
@@ -585,7 +696,7 @@ func _setup_hud() -> void:
 	score_p1_label.add_theme_constant_override("outline_size", 2)
 	score_p1_label.add_theme_color_override("font_outline_color", Color(0.0, 0.0, 0.0, 1.0))
 
-	score_p2_label.position = Vector2(vp_w * 0.5 + 110.0, vp_h - 148.0)
+	score_p2_label.position = Vector2(vp_w * 0.5 + 110.0, 14.0)
 	score_p2_label.size = Vector2(320.0, 34.0)
 	score_p2_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	score_p2_label.add_theme_color_override("font_color", Color(1.0, 0.8, 0.4, 1.0))
@@ -593,7 +704,7 @@ func _setup_hud() -> void:
 	score_p2_label.add_theme_constant_override("outline_size", 2)
 	score_p2_label.add_theme_color_override("font_outline_color", Color(0.0, 0.0, 0.0, 1.0))
 
-	count_label.position = Vector2(vp_w * 0.5 - 420.0, vp_h - 114.0)
+	count_label.position = Vector2(vp_w * 0.5 - 420.0, 48.0)
 	count_label.size = Vector2(840.0, 28.0)
 	count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	count_label.add_theme_color_override("font_color", Color.WHITE)
@@ -609,7 +720,7 @@ func _setup_hud() -> void:
 	_setup_player_hud(cl, Vector2(vp_w - _SLOT_WIDTH - 42.0, vp_h - 220.0), _hud_slots_p2, _hud_styles_p2, _hud_count_labels_p2, true)
 
 	_hud_diag_bg = Panel.new()
-	_hud_diag_bg.position = Vector2(vp_w * 0.5 - 304.0, vp_h - 92.0)
+	_hud_diag_bg.position = Vector2(vp_w * 0.5 - 304.0, 80.0)
 	_hud_diag_bg.size = Vector2(608.0, 80.0)
 	var diag_bg_style: StyleBoxFlat = StyleBoxFlat.new()
 	diag_bg_style.bg_color = Color(0.02, 0.02, 0.05, 0.82)
@@ -623,7 +734,7 @@ func _setup_hud() -> void:
 	cl.add_child(_hud_diag_bg)
 
 	_hud_diag_label = Label.new()
-	_hud_diag_label.position = Vector2(vp_w * 0.5 - 290.0, vp_h - 86.0)
+	_hud_diag_label.position = Vector2(vp_w * 0.5 - 290.0, 86.0)
 	_hud_diag_label.size = Vector2(580.0, 72.0)
 	_hud_diag_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_hud_diag_label.vertical_alignment = VERTICAL_ALIGNMENT_TOP
@@ -642,12 +753,13 @@ func _setup_hud() -> void:
 	_win_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.15, 1.0))
 	_win_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_win_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_win_label.position = Vector2(vp_w * 0.5 - 340.0, vp_h * 0.5 - 60.0)
+	_win_label.position = Vector2(vp_w * 0.5 - 340.0, 170.0)
 	_win_label.size = Vector2(680.0, 120.0)
 	_win_label.hide()
 	cl.add_child(_win_label)
 
 
+## Creates a standardized HUD resource label.
 func _make_res_label(pos: Vector2, align: HorizontalAlignment) -> Label:
 	var lbl: Label = Label.new()
 	lbl.position = pos
@@ -660,6 +772,7 @@ func _make_res_label(pos: Vector2, align: HorizontalAlignment) -> Label:
 	return lbl
 
 
+## Caches species textures for HUD icons.
 func _cache_species_textures() -> void:
 	_species_textures.clear()
 	for species_name: StringName in _species_order:
@@ -672,6 +785,7 @@ func _cache_species_textures() -> void:
 			_species_textures[species_name] = texture
 
 
+## Returns zero-initialized species counter dictionary.
 func _zero_species_counter() -> Dictionary:
 	var counters: Dictionary = {}
 	for species_name: StringName in _species_order:
@@ -679,6 +793,7 @@ func _zero_species_counter() -> Dictionary:
 	return counters
 
 
+## Sums numeric values across all tracked fish species.
 func _sum_species_values(values: Dictionary) -> float:
 	var total: float = 0.0
 	for species_name: StringName in _species_order:
@@ -686,6 +801,7 @@ func _sum_species_values(values: Dictionary) -> float:
 	return total
 
 
+## Builds one player's species slot panels in the HUD.
 func _setup_player_hud(cl: CanvasLayer, base: Vector2, slots: Dictionary, styles: Dictionary, count_labels: Dictionary, right_aligned: bool) -> void:
 	for i: int in _species_order.size():
 		var species: StringName = _species_order[i]
@@ -748,6 +864,7 @@ func _setup_player_hud(cl: CanvasLayer, base: Vector2, slots: Dictionary, styles
 		count_labels[species] = count_lbl
 
 
+## Refreshes HUD state (resources, selected species, spawn counts, diagnostics).
 func _update_hud() -> void:
 	if spawner_p1 == null or spawner_p2 == null:
 		return
@@ -792,6 +909,7 @@ func _update_hud() -> void:
 		]
 
 
+## Ends round when score lead reaches configured threshold.
 func _check_win_condition() -> void:
 	var s1: float = float(score_by_player.get(1, 0.0))
 	var s2: float = float(score_by_player.get(2, 0.0))
@@ -801,6 +919,7 @@ func _check_win_condition() -> void:
 		_end_round(2)
 
 
+## Finalizes a round, shows winner UI, and writes analytics rows.
 func _end_round(winner_player: int) -> void:
 	_match_active = false
 	_reset_timer = _RESET_DELAY
@@ -813,6 +932,7 @@ func _end_round(winner_player: int) -> void:
 	_write_spawn_sequences()
 
 
+## Resets pond state and advances to the next scheduled match.
 func _do_reset() -> void:
 	var children: Array = pond.get_children().duplicate()
 	for child: Node in children:
@@ -827,8 +947,6 @@ func _do_reset() -> void:
 	_spawn_seq_events_p1.clear()
 	_spawn_seq_events_p2.clear()
 	_fish_lifecycle_by_id.clear()
-	_debug_sabalo_fish_id = 0
-	_debug_sabalo_pending_handoff = true
 	_pellet_spawn_timer = 0.0
 	_reset_match_analytics()
 	if spawner_p1 != null and spawner_p1.has_method("reset"):
@@ -845,6 +963,7 @@ func _do_reset() -> void:
 	_start_match()
 
 
+## Appends one aggregated playtest row to playtests.csv.
 func _write_csv_row(winner_ai: String) -> void:
 	var path: String = "user://playtests.csv"
 	var file: FileAccess = FileAccess.open(path, FileAccess.READ_WRITE)
@@ -918,6 +1037,7 @@ func _write_csv_row(winner_ai: String) -> void:
 	])
 
 
+## Appends per-player per-species metrics for the finished round.
 func _write_round_metrics_row(winner_ai: String) -> void:
 	var file: FileAccess = FileAccess.open("user://round_metrics.csv", FileAccess.READ_WRITE)
 	if file == null:
@@ -945,6 +1065,7 @@ func _write_round_metrics_row(winner_ai: String) -> void:
 	file.close()
 
 
+## Appends ordered spawn sequence events for both players.
 func _write_spawn_sequences() -> void:
 	var path: String = "user://spawn_sequences.csv"
 	var file: FileAccess = FileAccess.open(path, FileAccess.READ_WRITE)
@@ -979,6 +1100,7 @@ func _write_spawn_sequences() -> void:
 	file.close()
 
 
+## Builds match schedule from current mode and lap count.
 func _build_schedule() -> void:
 	_schedule.clear()
 	if _schedule_mode == ScheduleMode.FOCUSED_SUITE:
@@ -990,6 +1112,7 @@ func _build_schedule() -> void:
 				_schedule.append({"lap": lap, "p1": i, "p2": j})
 
 
+## Builds focused benchmark schedule for extreme profile matchups.
 func _build_focused_suite_schedule() -> void:
 	var idx_g: int = _find_ai_profile_index("G100S0D0")
 	var idx_s: int = _find_ai_profile_index("G0S100D0")
@@ -1012,6 +1135,7 @@ func _build_focused_suite_schedule() -> void:
 			_schedule.append({"lap": lap, "p1": int(pairing["p1"]), "p2": int(pairing["p2"])})
 
 
+## Returns AI profile index by compact name, or -1 when missing.
 func _find_ai_profile_index(profile_name: String) -> int:
 	for i: int in range(_ai_profiles.size()):
 		var profile: Dictionary = _ai_profiles[i] as Dictionary
@@ -1020,6 +1144,7 @@ func _find_ai_profile_index(profile_name: String) -> int:
 	return -1
 
 
+## Initializes analytics CSV files and writes headers.
 func _init_csv_files() -> void:
 	var f1: FileAccess = FileAccess.open("user://playtests.csv", FileAccess.WRITE)
 	if f1 != null:
@@ -1036,6 +1161,7 @@ func _init_csv_files() -> void:
 		f3.close()
 
 
+## Starts one scheduled match by applying AI strategies and seeding entities.
 func _start_match() -> void:
 	var entry: Dictionary = _schedule[_schedule_index]
 	var p1_profile: Dictionary = _ai_profiles[int(entry["p1"])] as Dictionary
@@ -1054,6 +1180,7 @@ func _start_match() -> void:
 	_seed_startup_detritus()
 
 
+## Defines the built-in AI profile suite used for schedule generation.
 func _initialize_ai_profiles() -> void:
 	_ai_profiles = [
 		_make_profile("G100S0D0", 1.00, 0.00, 0.00),
@@ -1076,6 +1203,7 @@ func _initialize_ai_profiles() -> void:
 	_validate_ai_profiles()
 
 
+## Creates one profile dictionary from species weight ratios.
 func _make_profile(profile_name: String, guppy: float, sabalo: float, dientudo: float) -> Dictionary:
 	return {
 		"name": profile_name,
@@ -1087,6 +1215,7 @@ func _make_profile(profile_name: String, guppy: float, sabalo: float, dientudo: 
 	}
 
 
+## Validates profile count and normalized weight sums.
 func _validate_ai_profiles() -> void:
 	if _ai_profiles.size() != 16:
 		push_error("Zoo: expected 16 AI profiles, got %d" % _ai_profiles.size())
@@ -1101,6 +1230,7 @@ func _validate_ai_profiles() -> void:
 			push_error("Zoo: invalid weights for %s (sum=%.4f)" % [profile_name, sum_weights])
 
 
+## Clears round analytics counters and lifecycle registries.
 func _reset_match_analytics() -> void:
 	_match_elapsed_seconds = 0.0
 	_match_frames = 0
@@ -1117,6 +1247,7 @@ func _reset_match_analytics() -> void:
 	_spawn_seq_events_p2.clear()
 
 
+## Creates nested player->species metrics dictionary initialized to zero.
 func _new_player_species_metrics() -> Dictionary:
 	return {
 		1: _zero_species_counter(),
@@ -1124,6 +1255,7 @@ func _new_player_species_metrics() -> Dictionary:
 	}
 
 
+## Increments one player/species metric bucket.
 func _increment_species_metric(metrics: Dictionary, player_id: int, species_name: StringName) -> void:
 	if not metrics.has(player_id):
 		metrics[player_id] = _zero_species_counter()
@@ -1132,6 +1264,7 @@ func _increment_species_metric(metrics: Dictionary, player_id: int, species_name
 	metrics[player_id] = per_species
 
 
+## Reads one player/species metric value with safe default.
 func _species_metric_value(metrics: Dictionary, player_id: int, species_name: StringName) -> int:
 	if not metrics.has(player_id):
 		return 0
@@ -1139,6 +1272,7 @@ func _species_metric_value(metrics: Dictionary, player_id: int, species_name: St
 	return int(per_species.get(species_name, 0))
 
 
+## Tracks alive exits split by minimum feed-count thresholds.
 func _register_alive_exit(player_id: int, species_name: StringName, feed_count: int) -> void:
 	_increment_species_metric(_alive_exits_by_player_species, player_id, species_name)
 	if feed_count >= 1:
@@ -1149,6 +1283,7 @@ func _register_alive_exit(player_id: int, species_name: StringName, feed_count: 
 		_increment_species_metric(_alive_exits_ge5_by_player_species, player_id, species_name)
 
 
+## Records ordered spawn events and spent-resource ratios for sequence analytics.
 func _record_spawn_sequence_event(player_id: int, species_name: StringName) -> void:
 	var target: Array[Dictionary] = _spawn_seq_events_p1 if player_id == 1 else _spawn_seq_events_p2
 	var source_spawner: Node2D = spawner_p1 if player_id == 1 else spawner_p2
@@ -1174,6 +1309,7 @@ func _record_spawn_sequence_event(player_id: int, species_name: StringName) -> v
 	})
 
 
+## Encodes a compact printable weight triple (G|S|D).
 func _weights_to_compact_string(weights: Dictionary) -> String:
 	var g: float = float(weights.get(SpeciesRegistry.GUPPY, 0.0))
 	var s: float = float(weights.get(SpeciesRegistry.SABALO, 0.0))

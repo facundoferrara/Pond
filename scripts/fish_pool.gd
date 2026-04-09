@@ -5,11 +5,16 @@ extends Node
 ## When the free list is exhausted, allocates a new instance and keeps it permanently.
 ## Population is never hard-capped; the ceiling is determined by gameplay parameters.
 
+@export_group("Pool Prewarm")
 ## Fish instantiated at startup per type to avoid cold-start hitch.
 @export var pre_warm_guppy_count: int = 20
+## Prewarm count for sabalo instances.
 @export var pre_warm_sabalo_count: int = 10
+## Prewarm count for dientudo instances.
 @export var pre_warm_dientudo_count: int = 5
+## Prewarm count for pellet instances.
 @export var pre_warm_pellet_count: int = 50
+## Prewarm count for detritus instances.
 @export var pre_warm_detritus_count: int = 20
 
 var _free_by_species: Dictionary = {}
@@ -27,6 +32,7 @@ func _ready() -> void:
 		_prewarm(SpeciesRegistry.get_scene(species_name), _prewarm_count(species_name), _get_pool(species_name))
 
 
+## Creates and stores pooled nodes before gameplay starts.
 func _prewarm(scene: PackedScene, count: int, pool: Array[Fish]) -> void:
 	for _i: int in range(count):
 		var fish: Fish = scene.instantiate() as Fish
@@ -43,6 +49,7 @@ func acquire(species_name: StringName) -> Fish:
 	return _acquire(SpeciesRegistry.get_scene(normalized_species), _get_pool(normalized_species))
 
 
+## Returns a pooled fish, or allocates a new one if the pool is empty.
 func _acquire(scene: PackedScene, pool: Array[Fish]) -> Fish:
 	if not pool.is_empty():
 		return pool.pop_back()
@@ -72,6 +79,7 @@ func release(fish: Fish) -> void:
 	_get_pool(SpeciesRegistry.normalize_species(fish.species)).append(fish)
 
 
+## Resolves prewarm size for each pooled species.
 func _prewarm_count(species_name: StringName) -> int:
 	match SpeciesRegistry.normalize_species(species_name):
 		SpeciesRegistry.GUPPY:
@@ -87,6 +95,7 @@ func _prewarm_count(species_name: StringName) -> int:
 	return 0
 
 
+## Returns the mutable free-list bucket for a species.
 func _get_pool(species_name: StringName) -> Array[Fish]:
 	var normalized_species: StringName = SpeciesRegistry.normalize_species(species_name)
 	if not _free_by_species.has(normalized_species):

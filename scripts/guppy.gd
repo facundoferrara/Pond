@@ -1,6 +1,9 @@
 extends Fish
 class_name Guppy
 
+## Herbivore fish that schools, flees predators, and feeds on pellets.
+## Uses an exhaustion ramp so prolonged fleeing temporarily lowers top speed.
+
 @export_group("Guppy: Flee")
 ## Extra energy drain while actively fleeing predators.
 @export var flee_energy_drain_rate: float = 5.0
@@ -17,25 +20,36 @@ class_name Guppy
 ## Base speed ratio used by wander behavior.
 @export var wander_speed_factor: float = 0.38
 
+## Heading accumulator for smooth random wander.
 var wander_heading: Vector2 = Vector2.RIGHT
+## Swim pattern mode (0 = smooth, 1 = zigzag).
 var swim_mode: int = 0
+## Elapsed time in current swim mode.
 var mode_switch_timer: float = 0.0
+## Duration before next optional swim mode switch.
 var next_mode_switch_interval: float = 3.5
+## Current nearest pellet target while feeding.
 var pellet_target: Fish = null
+## Number of pellets consumed in this lifecycle.
 var pellets_eaten: int = 0
+## Accumulates exhausted time for smooth speed nerf ramping.
 var exhaustion_time: float = 0.0
 
 const _ENERGY_GAIN_PER_PELLET: float = 5.0
 const _WEIGHT_GAIN_PER_PELLET_G: float = 10.0
 const _EXHAUSTION_RAMP_SECONDS: float = 4.0
 const _MAX_EXHAUSTION_SPEED_NERF: float = 0.2
+const _MODE_SWITCH_INTERVAL_MIN: float = 2.0
+const _MODE_SWITCH_INTERVAL_MAX: float = 5.0
 
 
+## Sets species before base initialization.
 func _ready() -> void:
 	species = SpeciesDB.GUPPY
 	super._ready()
 
 
+## Applies species database overrides for guppy-specific tuning fields.
 func _apply_species_defaults() -> void:
 	super._apply_species_defaults()
 	var species_data: Dictionary = SpeciesDB.get_species(species)
@@ -45,17 +59,19 @@ func _apply_species_defaults() -> void:
 	turn_rate_rad_per_sec = float(species_data.get("turn_rate_rad_per_sec", turn_rate_rad_per_sec))
 
 
+## Resets mode switching, pellet targeting, and exhaustion state on pool reuse.
 func reinitialize() -> void:
 	super.reinitialize()
 	wander_heading = Vector2.RIGHT.rotated(randf_range(-PI, PI))
 	swim_mode = 0
 	mode_switch_timer = 0.0
-	next_mode_switch_interval = randf_range(2.0, 5.0)
+	next_mode_switch_interval = randf_range(_MODE_SWITCH_INTERVAL_MIN, _MODE_SWITCH_INTERVAL_MAX)
 	pellet_target = null
 	pellets_eaten = 0
 	exhaustion_time = 0.0
 
 
+## Updates swim mode and exhaustion speed cap after base movement processing.
 func _process(delta: float) -> void:
 	super._process(delta)
 	_update_swim_mode(delta)
@@ -72,6 +88,7 @@ func _process(delta: float) -> void:
 			velocity = velocity.normalized() * speed_cap
 
 
+## Computes guppy steering for feed/flee/exhausted/school states.
 func _compute_acceleration(delta: float) -> Vector2:
 	var avoid_despawner: Vector2 = _compute_despawner_avoidance()
 	var pellet_turnover_bias: Vector2 = _compute_pellet_turnover_despawn_bias()
@@ -104,6 +121,7 @@ func _compute_acceleration(delta: float) -> Vector2:
 	return result
 
 
+## Refreshes pellet target unless predator threat is active.
 func _update_context() -> void:
 	super._update_context()
 	pellet_target = null
@@ -122,6 +140,7 @@ func _update_context() -> void:
 			pellet_target = other
 
 
+## Selects behavior state based on predator risk, age, and pellet availability.
 func _update_behavior_state() -> void:
 	if _predator_valid():
 		behavior_state = BehaviorState.FLEE
@@ -178,7 +197,7 @@ func _update_swim_mode(delta: float) -> void:
 	mode_switch_timer += delta
 	if mode_switch_timer >= next_mode_switch_interval:
 		mode_switch_timer = 0.0
-		next_mode_switch_interval = randf_range(2.0, 5.0)
+		next_mode_switch_interval = randf_range(_MODE_SWITCH_INTERVAL_MIN, _MODE_SWITCH_INTERVAL_MAX)
 		if randf() < 0.5:
 			swim_mode = 1 - swim_mode
 
@@ -230,30 +249,11 @@ func _steer_towards_despawn() -> Vector2:
 
 
 func _compute_age_despawn_bias() -> Vector2:
-	var ratio: float = _age_ratio()
-	if ratio < 0.75:
-		return Vector2.ZERO
-	var t: float = (ratio - 0.75) / 0.25
-	return _steer_towards_despawn() * t
+	return _compute_guppy_style_age_despawn_bias(1.0)
 
 
 func _compute_despawner_avoidance() -> Vector2:
-	var ratio: float = _age_ratio()
-	if ratio >= 0.75:
-		return Vector2.ZERO
-
-	var away: Vector2 = global_position - despawn_area_center
-	var distance: float = away.length()
-	if distance >= despawner_avoid_radius:
-		return Vector2.ZERO
-	if away.length_squared() <= 0.000001:
-		away = Vector2.RIGHT.rotated(randf_range(-PI, PI))
-
-	var strength: float = 1.0 - clampf(distance / max(despawner_avoid_radius, 0.0001), 0.0, 1.0)
-	var youth_t: float = 1.0 - clampf(ratio / 0.75, 0.0, 1.0)
-	var desired: Vector2 = away.normalized() * top_speed
-	var young_boost: float = 1.0 + youth_t * 0.16
-	return _steer_towards(desired) * (despawner_avoid_force_multiplier * young_boost * (0.45 + strength * 1.55))
+	return _compute_guppy_style_despawner_avoidance(despawner_avoid_radius, despawner_avoid_force_multiplier, 0.16)
 
 
 func _refresh_age_tint() -> void:

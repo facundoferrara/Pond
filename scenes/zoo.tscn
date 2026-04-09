@@ -26,6 +26,13 @@ color = Color(0.6, 0.79, 0.86, 0.11)
 polygon = PackedVector2Array(120.9713, 248.16447, 211.9804, 113.959404, 211.9804, 69.8457, 144.74843, -9.683231, 154.58727, -43.234497, 189.02315, -59.38881, 249.69588, -41.99186, 357.10303, 82.89342, 429.2544, 118.30864, 557.979, 149.99594, 704.74146, 151.85991, 843.3049, 120.79392, 924.47516, 83.51473, 1014.66437, -37.642624, 1072.0574, -61.25277, 1118.7919, -50.069016, 1127.8108, -9.683231, 1071.2375, 67.981735, 1069.5978, 119.551285, 1151.5879, 251.27107, 1191.7631, 361.2447, 1199.1422, 455.06396, 1187.6636, 537.0782, 1139.2894, 583.6772, 1054.8395, 630.89746, 928.57465, 658.8569, 709.6608, 693.65076, 710.4808, 786.2274, 575.19696, 785.6061, 575.19696, 693.65076, 343.16467, 660.0995, 211.9804, 630.89746, 124.2509, 579.32794, 84.0757, 524.03046, 74.23688, 443.2589, 85.7155, 356.89545)
 
 [node name="OutBoundary" type="Line2D" parent="." unique_id=1410733489]
+visible = false
+closed = true
+width = 2.0
+default_color = Color(0.95, 0.2, 0.2, 0.45)
+
+[node name="OutBoundaryDebug" type="Line2D" parent="."]
+visible = false
 closed = true
 width = 2.0
 default_color = Color(0.95, 0.2, 0.2, 0.45)
@@ -74,13 +81,13 @@ text = "Fish: 0 / 100"
 
 [node name="ModeOverlay" type="Panel" parent="CanvasLayer"]
 anchor_left = 0.5
-anchor_top = 0.5
+anchor_top = 0.0
 anchor_right = 0.5
-anchor_bottom = 0.5
+anchor_bottom = 0.0
 offset_left = -300.0
-offset_top = -200.0
+offset_top = 16.0
 offset_right = 300.0
-offset_bottom = 200.0
+offset_bottom = 416.0
 
 [node name="BtnRoundRobin" type="Button" parent="CanvasLayer/ModeOverlay"]
 offset_left = 80.0

@@ -1,6 +1,10 @@
 extends Node2D
 class_name Fish
 
+## Shared base class for active pond entities (fish, pellet, detritus).
+## Lifecycle is pool-based: acquire -> configure_from_zoo -> reinitialize -> release.
+## Zoo listens to fish_exited/feed_succeeded for scoring and analytics.
+
 signal fish_exited(player_id: int, point_value: int, redeemed_biomass_g: float, fish_id: int, fish_species: StringName, feed_count: int)
 signal feed_succeeded(player_id: int, fish_species: StringName, fish_id: int, feed_count: int)
 
@@ -113,7 +117,7 @@ var out_boundary_polygon: PackedVector2Array = PackedVector2Array()
 var previous_global_position: Vector2 = Vector2.ZERO
 var warned_facing_no_motion: bool = false
 var source_spawner: NodePath = NodePath()
-var spawner_repel_radius: float = 340.0
+var spawner_repel_radius: float = 238.0
 var spawner_repel_force_multiplier: float = 1.8
 
 ## Cached spawner nodes, populated on first use (spawners outlive all fish).
@@ -125,11 +129,13 @@ var _pond_center_valid: bool = false
 var _context_frame_offset: int = 0
 ## Remaining time of forced center-seeking after spawn.
 var _spawn_center_bias_remaining: float = 0.0
+## Number of successful feeding events during this fish lifecycle.
 var _successful_feed_count: int = 0
 
 const _CONTEXT_UPDATE_INTERVAL: int = 3
 
 
+## Registers fish and initializes species defaults plus starting velocity/visuals.
 func _ready() -> void:
 	add_to_group("fish")
 	_context_frame_offset = randi() % _CONTEXT_UPDATE_INTERVAL
@@ -164,6 +170,7 @@ func reinitialize() -> void:
 	previous_global_position = global_position
 
 
+## Applies per-spawn ownership/tint/bounds and refreshes species-driven defaults.
 func configure_from_zoo(species_name: StringName, owner_player: int, tint: Color, bounds: Rect2) -> void:
 	species = species_name
 	player = owner_player
@@ -202,6 +209,7 @@ func _age_ratio() -> float:
 	return clampf(age_seconds / maxf(life_span_seconds, 0.001), 0.0, 1.0)
 
 
+## Main per-frame lifecycle: update state, steer, feed, refresh visuals, and emit exits.
 func _process(delta: float) -> void:
 	if pending_remove:
 		return
@@ -236,6 +244,7 @@ func _process(delta: float) -> void:
 		FishPool.release(self )
 
 
+## Loads species defaults from SpeciesDB, preserving current inspector values as fallback.
 func _apply_species_defaults() -> void:
 	var species_data: Dictionary = SpeciesDB.get_species(species)
 	starting_energy = float(species_data.get("starting_energy", starting_energy))
@@ -269,6 +278,7 @@ func _apply_species_defaults() -> void:
 			sprite.texture = texture
 
 
+## Computes boid separation/alignment/cohesion steering from nearby neighbors.
 func _compute_boid_steering(neighbors: Array[Fish]) -> Vector2:
 	var neighbor_count: int = 0
 	var separation_vector: Vector2 = Vector2.ZERO
@@ -322,6 +332,7 @@ func _steer_towards(desired_velocity: Vector2) -> Vector2:
 	return steer
 
 
+## Updates boid neighbors and nearest predator using SpatialGrid queries.
 func _update_context() -> void:
 	boid_neighbors.clear()
 	nearest_predator = null
@@ -353,6 +364,7 @@ func _update_context() -> void:
 			nearest_predator = other
 
 
+## Selects default flee/descend/school behavior for base fish.
 func _update_behavior_state() -> void:
 	if _predator_valid():
 		behavior_state = BehaviorState.FLEE
@@ -363,9 +375,12 @@ func _update_behavior_state() -> void:
 	behavior_state = BehaviorState.SCHOOL
 
 
+## Computes baseline acceleration for descend or normal movement.
 func _compute_acceleration(_delta: float) -> Vector2:
 	if behavior_state == BehaviorState.DESCEND:
-		return _compute_despawn_bias() + _compute_spawn_center_bias()
+		var descend_bias: Vector2 = _compute_guppy_style_age_despawn_bias(1.0)
+		var avoid_despawner: Vector2 = _compute_guppy_style_despawner_avoidance(220.0, 2.1, 0.16)
+		return _compute_spawn_center_bias() + descend_bias + avoid_despawner
 	return _compute_spawn_center_bias() + _compute_despawn_bias()
 
 
@@ -484,6 +499,41 @@ func _compute_spawn_center_bias() -> Vector2:
 	return _steer_towards(desired) * (spawn_center_bias_strength * (0.35 + 0.65 * t))
 
 
+func _compute_guppy_style_age_despawn_bias(strength_multiplier: float = 1.0) -> Vector2:
+	var ratio: float = _age_ratio()
+	if ratio < despawn_bias_start_ratio:
+		return Vector2.ZERO
+
+	var span: float = maxf(1.0 - despawn_bias_start_ratio, 0.001)
+	var t: float = clampf((ratio - despawn_bias_start_ratio) / span, 0.0, 1.0)
+	var to_despawn: Vector2 = despawn_area_center - global_position
+	if to_despawn.length_squared() <= 0.000001:
+		return Vector2.ZERO
+
+	var desired: Vector2 = to_despawn.normalized() * top_speed
+	return _steer_towards(desired) * (t * maxf(strength_multiplier, 0.0))
+
+
+func _compute_guppy_style_despawner_avoidance(avoid_radius: float, avoid_force_multiplier: float, youth_boost_max: float = 0.16) -> Vector2:
+	var ratio: float = _age_ratio()
+	if ratio >= despawn_bias_start_ratio:
+		return Vector2.ZERO
+
+	var away: Vector2 = global_position - despawn_area_center
+	var distance: float = away.length()
+	if distance >= avoid_radius:
+		return Vector2.ZERO
+	if away.length_squared() <= 0.000001:
+		away = Vector2.RIGHT.rotated(randf_range(-PI, PI))
+
+	var safe_radius: float = maxf(avoid_radius, 0.0001)
+	var strength: float = 1.0 - clampf(distance / safe_radius, 0.0, 1.0)
+	var youth_t: float = 1.0 - clampf(ratio / maxf(despawn_bias_start_ratio, 0.001), 0.0, 1.0)
+	var desired: Vector2 = away.normalized() * top_speed
+	var young_boost: float = 1.0 + youth_t * maxf(youth_boost_max, 0.0)
+	return _steer_towards(desired) * (avoid_force_multiplier * young_boost * (0.45 + strength * 1.55))
+
+
 func _compute_despawn_bias() -> Vector2:
 	var ratio: float = _age_ratio()
 	if ratio < despawn_bias_start_ratio:
@@ -579,8 +629,8 @@ func _compute_spawner_repulsion() -> Vector2:
 
 		var desired: Vector2 = to_fish.normalized() * top_speed
 		# Push starts earlier near the zone edge and ramps up strongly deeper inside.
-		var curved_proximity: float = pow(proximity, 1.4)
-		var scaled_strength: float = 0.30 + curved_proximity * 1.20
+		var curved_proximity: float = pow(proximity, 2.2)
+		var scaled_strength: float = 0.06 + curved_proximity * 1.34
 		total += _steer_towards(desired) * (repel_multiplier * 2.1 * scaled_strength)
 
 	return total

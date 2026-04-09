@@ -1,35 +1,55 @@
 extends Fish
 class_name Pellet
 
+## Passive food entity influenced by nearby fish advection and despawn flow bias.
+
 @export_group("Pellet: Fish Advection")
+## Radius used to gather nearby fish that can advect the pellet.
 @export var fish_influence_radius: float = 58.0
+## Dot threshold where fish is considered moving toward pellet.
 @export_range(-1.0, 1.0, 0.05) var approach_dot_threshold: float = 0.35
+## Dot threshold where fish is considered moving away from pellet.
 @export_range(0.0, 1.0, 0.05) var away_dot_threshold: float = 0.35
+## Influence multiplier when fish is approaching pellet.
 @export var approach_influence: float = 0.85
+## Influence multiplier when fish swims tangentially near pellet.
 @export var tangent_influence: float = 1.55
+## Reverse influence multiplier when fish is pulling water away.
 @export var away_influence: float = 2.55
+## Pellet speed cap as ratio of the strongest nearby fish speed.
 @export_range(0.05, 1.0, 0.05) var max_speed_ratio_to_fish: float = 0.70
 
 @export_group("Pellet: River Flow")
+## Steering strength toward despawn flow direction.
 @export var flow_bias_strength: float = 0.85
+## Speed ratio of flow direction relative to pellet top speed.
 @export var flow_speed_factor: float = 0.30
 
 @export_group("Pellet: Motion")
+## Scale of boid steering contribution among pellets.
 @export var pellet_boid_scale: float = 0.20
+## Amplitude of ambient drift force.
 @export var drift_strength: float = 3.5
+## Frequency multiplier for ambient drift oscillation.
 @export var drift_frequency: float = 0.9
+## Linear damping used to avoid runaway pellet velocity.
 @export var linear_damping: float = 0.8
+## Render order used to keep pellets above fish body sprites.
 @export var pellet_overlay_z_index: int = 120
 
+## Fish in advection range collected each context refresh.
 var _nearby_fish: Array[Fish] = []
+## Drift phase accumulator used by the ambient oscillation.
 var _drift_phase: float = 0.0
 
 
+## Sets pellet species before base initialization.
 func _ready() -> void:
 	species = SpeciesRegistry.PELLET
 	super._ready()
 
 
+## Resets drift and initial flow-aligned velocity when reused from pool.
 func reinitialize() -> void:
 	super.reinitialize()
 	z_index = pellet_overlay_z_index
@@ -40,6 +60,7 @@ func reinitialize() -> void:
 	velocity = flow_dir.normalized().rotated(randf_range(-0.35, 0.35)) * top_speed * 0.15
 
 
+## Collects nearby pellets and fish for boid and advection forces.
 func _update_context() -> void:
 	boid_neighbors.clear()
 	_nearby_fish.clear()
@@ -57,10 +78,12 @@ func _update_context() -> void:
 			_nearby_fish.append(other)
 
 
+## Pellets always use SCHOOL state as passive movers.
 func _update_behavior_state() -> void:
 	behavior_state = BehaviorState.SCHOOL
 
 
+## Combines pellet boid, fish advection, flow, drift, and damping.
 func _compute_acceleration(delta: float) -> Vector2:
 	var pellet_boid: Vector2 = _compute_boid_steering(boid_neighbors) * pellet_boid_scale
 	var fish_advection: Vector2 = _compute_fish_advection()

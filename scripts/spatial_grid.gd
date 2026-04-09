@@ -5,7 +5,9 @@ extends Node
 ## Fish registered here are the live, active fish only.
 ## Pooled (inactive) fish are never registered.
 
-const CELL_SIZE: float = 120.0 ## Matches default vision_radius.
+@export_group("Spatial Grid")
+## Grid cell size in pixels. Keep near common vision radii for fewer queried cells.
+@export var cell_size: float = 120.0
 
 ## Vector2i cell key -> Array of Fish in that cell.
 var _cells: Dictionary = {}
@@ -34,7 +36,8 @@ func rebuild() -> void:
 ## May include fish slightly outside the exact radius; callers should distance-check if needed.
 func query_neighbors(pos: Vector2, radius: float) -> Array[Fish]:
 	var result: Array[Fish] = []
-	var cell_radius: int = ceili(radius / CELL_SIZE)
+	var safe_cell_size: float = maxf(cell_size, 1.0)
+	var cell_radius: int = ceili(radius / safe_cell_size)
 	var center: Vector2i = _cell_for(pos)
 	for dx: int in range(-cell_radius, cell_radius + 1):
 		for dy: int in range(-cell_radius, cell_radius + 1):
@@ -83,4 +86,5 @@ func unregister_fish(fish: Fish) -> void:
 
 
 func _cell_for(pos: Vector2) -> Vector2i:
-	return Vector2i(floori(pos.x / CELL_SIZE), floori(pos.y / CELL_SIZE))
+	var safe_cell_size: float = maxf(cell_size, 1.0)
+	return Vector2i(floori(pos.x / safe_cell_size), floori(pos.y / safe_cell_size))
