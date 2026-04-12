@@ -6,7 +6,7 @@ class_name Fish
 ## Zoo listens to fish_exited/feed_succeeded for scoring and analytics.
 
 signal fish_exited(player_id: int, point_value: int, redeemed_biomass_g: float, fish_id: int, fish_species: StringName, feed_count: int)
-signal feed_succeeded(player_id: int, fish_species: StringName, fish_id: int, feed_count: int)
+signal feed_succeeded(player_id: int, fish_species: StringName, fish_id: int, feed_count: int, weight_gain_g: float, point_delta: int, target_fish_id: int, target_species: StringName, target_player_id: int)
 
 enum BehaviorState {
 	SCHOOL,
@@ -131,6 +131,8 @@ var _context_frame_offset: int = 0
 var _spawn_center_bias_remaining: float = 0.0
 ## Number of successful feeding events during this fish lifecycle.
 var _successful_feed_count: int = 0
+var _pending_feed_point_delta: int = 0
+var _pending_feed_target: Fish = null
 
 const _CONTEXT_UPDATE_INTERVAL: int = 3
 
@@ -154,6 +156,8 @@ func reinitialize() -> void:
 	is_out_of_game = false
 	age_seconds = 0.0
 	_successful_feed_count = 0
+	_pending_feed_point_delta = 0
+	_pending_feed_target = null
 	point_value = starting_point_value
 	age_speed_multiplier = 1.0
 	boid_neighbors.clear()
@@ -379,8 +383,7 @@ func _update_behavior_state() -> void:
 func _compute_acceleration(_delta: float) -> Vector2:
 	if behavior_state == BehaviorState.DESCEND:
 		var descend_bias: Vector2 = _compute_guppy_style_age_despawn_bias(1.0)
-		var avoid_despawner: Vector2 = _compute_guppy_style_despawner_avoidance(220.0, 2.1, 0.16)
-		return _compute_spawn_center_bias() + descend_bias + avoid_despawner
+		return _compute_spawn_center_bias() + descend_bias
 	return _compute_spawn_center_bias() + _compute_despawn_bias()
 
 
@@ -459,19 +462,40 @@ func set_weight_grams(new_weight: float) -> void:
 	_refresh_scale()
 
 
+func set_pending_feed_diagnostics(point_delta: int = 0, target: Fish = null) -> void:
+	_pending_feed_point_delta = point_delta
+	_pending_feed_target = target
+
+
 func mark_successful_feed(weight_gain_g: float = 0.0) -> void:
 	if not can_feed():
+		_pending_feed_point_delta = 0
+		_pending_feed_target = null
 		return
 	_successful_feed_count += 1
 	if weight_gain_g > 0.0:
 		weight = maxf(0.001, weight + weight_gain_g)
 	_refresh_scale()
 	saturation_ratio = clampf(saturation_ratio + 0.05, 0.0, 1.0)
-	feed_succeeded.emit(player, species, get_instance_id(), _successful_feed_count)
+	var target_fish_id: int = 0
+	var target_species: StringName = StringName()
+	var target_player_id: int = 0
+	if _pending_feed_target != null and is_instance_valid(_pending_feed_target):
+		target_fish_id = _pending_feed_target.get_instance_id()
+		target_species = _pending_feed_target.species
+		if _pending_feed_target.species != SpeciesRegistry.PELLET and _pending_feed_target.species != SpeciesRegistry.DETRITUS:
+			target_player_id = _pending_feed_target.player
+	feed_succeeded.emit(player, species, get_instance_id(), _successful_feed_count, weight_gain_g, _pending_feed_point_delta, target_fish_id, target_species, target_player_id)
+	_pending_feed_point_delta = 0
+	_pending_feed_target = null
 
 
 func get_successful_feed_count() -> int:
 	return _successful_feed_count
+
+
+func get_diagnostic_feed_target() -> Fish:
+	return null
 
 
 func add_points(points_to_add: int) -> void:
@@ -512,26 +536,6 @@ func _compute_guppy_style_age_despawn_bias(strength_multiplier: float = 1.0) -> 
 
 	var desired: Vector2 = to_despawn.normalized() * top_speed
 	return _steer_towards(desired) * (t * maxf(strength_multiplier, 0.0))
-
-
-func _compute_guppy_style_despawner_avoidance(avoid_radius: float, avoid_force_multiplier: float, youth_boost_max: float = 0.16) -> Vector2:
-	var ratio: float = _age_ratio()
-	if ratio >= despawn_bias_start_ratio:
-		return Vector2.ZERO
-
-	var away: Vector2 = global_position - despawn_area_center
-	var distance: float = away.length()
-	if distance >= avoid_radius:
-		return Vector2.ZERO
-	if away.length_squared() <= 0.000001:
-		away = Vector2.RIGHT.rotated(randf_range(-PI, PI))
-
-	var safe_radius: float = maxf(avoid_radius, 0.0001)
-	var strength: float = 1.0 - clampf(distance / safe_radius, 0.0, 1.0)
-	var youth_t: float = 1.0 - clampf(ratio / maxf(despawn_bias_start_ratio, 0.001), 0.0, 1.0)
-	var desired: Vector2 = away.normalized() * top_speed
-	var young_boost: float = 1.0 + youth_t * maxf(youth_boost_max, 0.0)
-	return _steer_towards(desired) * (avoid_force_multiplier * young_boost * (0.45 + strength * 1.55))
 
 
 func _compute_despawn_bias() -> Vector2:

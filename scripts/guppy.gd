@@ -8,12 +8,6 @@ class_name Guppy
 ## Extra energy drain while actively fleeing predators.
 @export var flee_energy_drain_rate: float = 5.0
 
-@export_group("Guppy: Despawner Avoidance")
-## Radius where young guppies begin avoiding despawn zone.
-@export var despawner_avoid_radius: float = 220.0
-## Steering multiplier while avoiding despawn zone.
-@export var despawner_avoid_force_multiplier: float = 2.1
-
 @export_group("Guppy: Movement")
 ## Rotation speed limit used when orienting body to velocity.
 @export var turn_rate_rad_per_sec: float = 9.0
@@ -54,8 +48,6 @@ func _apply_species_defaults() -> void:
 	super._apply_species_defaults()
 	var species_data: Dictionary = SpeciesDB.get_species(species)
 	flee_energy_drain_rate = float(species_data.get("flee_energy_drain_rate", flee_energy_drain_rate))
-	despawner_avoid_radius = float(species_data.get("despawner_avoid_radius", despawner_avoid_radius))
-	despawner_avoid_force_multiplier = float(species_data.get("despawner_avoid_force_multiplier", despawner_avoid_force_multiplier))
 	turn_rate_rad_per_sec = float(species_data.get("turn_rate_rad_per_sec", turn_rate_rad_per_sec))
 
 
@@ -90,32 +82,31 @@ func _process(delta: float) -> void:
 
 ## Computes guppy steering for feed/flee/exhausted/school states.
 func _compute_acceleration(delta: float) -> Vector2:
-	var avoid_despawner: Vector2 = _compute_despawner_avoidance()
 	var pellet_turnover_bias: Vector2 = _compute_pellet_turnover_despawn_bias()
 	if behavior_state == BehaviorState.FEED and pellet_target != null and is_instance_valid(pellet_target):
 		var to_pellet: Vector2 = pellet_target.global_position - global_position
 		if to_pellet.length_squared() > 0.000001:
 			var desired: Vector2 = to_pellet.normalized() * top_speed
-			return _steer_towards(desired) * 1.8 + avoid_despawner + pellet_turnover_bias
+			return _steer_towards(desired) * 1.8 + pellet_turnover_bias
 
 	if behavior_state == BehaviorState.FLEE:
 		var flee_steer: Vector2 = _compute_distance_scaled_flee_steer()
 		energy = maxf(0.0, energy - flee_energy_drain_rate * delta)
 		if _is_exhausted():
-			return flee_steer + avoid_despawner + pellet_turnover_bias
+			return flee_steer + pellet_turnover_bias
 		var flee: Vector2 = flee_steer * 2.1
 		var support_school: Vector2 = _compute_boid_steering(boid_neighbors) * 0.35
-		return flee + support_school + avoid_despawner + pellet_turnover_bias
+		return flee + support_school + pellet_turnover_bias
 
 	if _is_exhausted():
 		if _age_ratio() < 0.75:
-			return avoid_despawner + pellet_turnover_bias
+			return pellet_turnover_bias
 		return _steer_towards_despawn() + pellet_turnover_bias
 
 	var boid: Vector2 = _compute_age_aware_boid_steering()
 	var age_bias: Vector2 = _compute_age_despawn_bias()
 	var wander: Vector2 = _compute_wander(delta)
-	var result: Vector2 = boid + age_bias + wander + avoid_despawner + pellet_turnover_bias
+	var result: Vector2 = boid + age_bias + wander + pellet_turnover_bias
 	if swim_mode == 1:
 		result += _compute_zigzag_steering(delta)
 	return result
@@ -252,10 +243,6 @@ func _compute_age_despawn_bias() -> Vector2:
 	return _compute_guppy_style_age_despawn_bias(1.0)
 
 
-func _compute_despawner_avoidance() -> Vector2:
-	return _compute_guppy_style_despawner_avoidance(despawner_avoid_radius, despawner_avoid_force_multiplier, 0.16)
-
-
 func _refresh_age_tint() -> void:
 	return
 
@@ -291,11 +278,18 @@ func _process_feeding(_delta: float) -> void:
 		return
 	pellets_eaten += 1
 	add_points(1)
+	set_pending_feed_diagnostics(1, pellet_target)
 	mark_successful_feed(_WEIGHT_GAIN_PER_PELLET_G)
 	energy += _ENERGY_GAIN_PER_PELLET
 	pellet_target.pending_remove = true
 	FishPool.release(pellet_target)
 	pellet_target = null
+
+
+func get_diagnostic_feed_target() -> Fish:
+	if pellet_target == null or not is_instance_valid(pellet_target) or pellet_target.pending_remove:
+		return null
+	return pellet_target
 
 
 func _compute_pellet_turnover_despawn_bias() -> Vector2:

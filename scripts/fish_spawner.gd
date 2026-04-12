@@ -34,10 +34,12 @@ static func species_cost(species: StringName) -> int:
 
 var resources: float = 0.0
 var selected_species: StringName = SpeciesRegistry.DEFAULT_SPECIES
+var manual_control_enabled: bool = false
 
 var _queued_species: StringName = SpeciesRegistry.DEFAULT_SPECIES
 var _spawn_ready: bool = false
 var _cooldown: float = 0.0
+var _manual_species_index: int = 0
 var strategy: Dictionary = {}
 var strategy_name: String = "random"
 var resources_spent_by_species: Dictionary = {}
@@ -61,7 +63,7 @@ func _ready() -> void:
 func advance(delta: float) -> void:
 	resources = minf(RESOURCE_MAX, resources + RESOURCE_REGEN * delta)
 	_cooldown = maxf(0.0, _cooldown - delta)
-	if _cooldown <= 0.0 and not _spawn_ready:
+	if not manual_control_enabled and _cooldown <= 0.0 and not _spawn_ready:
 		_try_queue_spawn()
 
 
@@ -78,7 +80,8 @@ func _try_queue_spawn() -> void:
 		_cooldown = GUPPY_BURST_INTERVAL
 	else:
 		_cooldown = INDIVIDUAL_COOLDOWN
-	_roll_species()
+	if not manual_control_enabled:
+		_roll_species()
 
 
 ## Chooses next species from strategy weights with deficit correction.
@@ -134,9 +137,52 @@ func _roll_species() -> void:
 
 ## Applies strategy weights used by _roll_species().
 func configure_strategy(strategy_label: String, weights: Dictionary) -> void:
+	manual_control_enabled = false
 	strategy_name = strategy_label
 	strategy = weights.duplicate()
 	_roll_species()
+
+
+## Enables local manual species control and disables weighted auto-rolling.
+func set_manual_control_enabled(enabled: bool) -> void:
+	manual_control_enabled = enabled
+	if not manual_control_enabled:
+		return
+	strategy_name = "manual"
+	strategy.clear()
+	var species_list: Array[StringName] = SpeciesRegistry.all_species()
+	if species_list.is_empty():
+		selected_species = SpeciesRegistry.DEFAULT_SPECIES
+		_manual_species_index = 0
+		species_changed.emit(player_id, selected_species)
+		return
+	_manual_species_index = species_list.find(selected_species)
+	if _manual_species_index < 0:
+		_manual_species_index = 0
+	selected_species = species_list[_manual_species_index]
+	species_changed.emit(player_id, selected_species)
+
+
+## Advances selected species index by one step in manual mode.
+func cycle_selected_species(direction: int) -> void:
+	if not manual_control_enabled:
+		return
+	var species_list: Array[StringName] = SpeciesRegistry.all_species()
+	if species_list.is_empty():
+		return
+	var step: int = 1 if direction >= 0 else -1
+	_manual_species_index = posmod(_manual_species_index + step, species_list.size())
+	selected_species = species_list[_manual_species_index]
+	species_changed.emit(player_id, selected_species)
+
+
+## Attempts one spawn from the currently selected manual species.
+func request_spawn_accept() -> void:
+	if not manual_control_enabled:
+		return
+	if _spawn_ready or _cooldown > 0.0:
+		return
+	_try_queue_spawn()
 
 
 ## Returns true when a spawn payload has been queued this frame window.
@@ -175,7 +221,11 @@ func reset() -> void:
 	_cooldown = 0.0
 	_initialize_species_tracking()
 	selected_species = SpeciesRegistry.DEFAULT_SPECIES
-	_roll_species()
+	if manual_control_enabled:
+		_manual_species_index = 0
+		species_changed.emit(player_id, selected_species)
+	else:
+		_roll_species()
 
 
 func _initialize_species_tracking() -> void:

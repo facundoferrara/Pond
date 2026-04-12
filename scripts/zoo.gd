@@ -5,7 +5,9 @@ extends Node2D
 
 enum ScheduleMode {
 	ROUND_ROBIN,
-	FOCUSED_SUITE
+	FOCUSED_SUITE,
+	TWO_PLAYERS,
+	ONE_PLAYER_CAMPAIGN
 }
 
 @onready var pond: Node2D = $Pond
@@ -21,6 +23,8 @@ enum ScheduleMode {
 @onready var _mode_overlay_node: Panel = $CanvasLayer/ModeOverlay
 @onready var _btn_rr: Button = $CanvasLayer/ModeOverlay/BtnRoundRobin
 @onready var _btn_fs: Button = $CanvasLayer/ModeOverlay/BtnFocusedSuite
+@onready var _btn_2p: Button = $CanvasLayer/ModeOverlay/BtnTwoPlayers
+@onready var _btn_campaign: Button = $CanvasLayer/ModeOverlay/BtnCampaign
 
 @export_group("Zoo: Boundary")
 ## Contact distance used to reinsert fish inside the out boundary.
@@ -50,7 +54,17 @@ enum ScheduleMode {
 ## Number of laps used in round-robin scheduling mode.
 @export_range(1, 20) var round_robin_laps: int = 3
 ## Lead threshold required to end a match.
-@export_range(1, 100) var win_lead_points: int = 12
+@export_range(1, 100) var win_lead_points: int = 25
+
+@export_group("Zoo: Diagnostics")
+## Enables extended end-of-match diagnostics during automated match runs.
+@export var enable_match_diagnostics: bool = true
+## Max contender distance in pixels for contest classification.
+@export var diagnostics_contest_distance_threshold_px: float = 180.0
+## Seconds contenders remain contest-eligible after last target sample.
+@export var diagnostics_contest_window_seconds: float = 1.25
+## Seconds a dropped contested target remains eligible as a denied opportunity.
+@export var diagnostics_denied_opportunity_window_seconds: float = 1.5
 
 var pond_bounds: Rect2
 var out_boundary_polygon: PackedVector2Array = PackedVector2Array()
@@ -69,7 +83,9 @@ const _PANEL_TOP: float = 0.0
 const _COL_SELECTED: Color = Color(1.0, 0.85, 0.15, 0.92)
 const _COL_UNSELECTED: Color = Color(0.08, 0.10, 0.18, 0.80)
 const _COL_PANEL_BG: Color = Color(0.03, 0.04, 0.08, 0.83)
+const _COL_PANEL_BG_SELECTED: Color = Color(0.86, 0.93, 1.0, 0.95)
 const _COL_TEXT_SUBTLE: Color = Color(1.0, 1.0, 1.0, 1.0)
+const _SPECIES_FLICK_COOLDOWN_SECONDS: float = 0.16
 
 var _hud_slots_p1: Dictionary = {}
 var _hud_slots_p2: Dictionary = {}
@@ -84,7 +100,15 @@ var _hud_diag_label: Label
 
 # --- Match state ---
 const _RESET_DELAY: float = 3.5
-const _CSV_SCHEMA_VERSION: int = 3
+const _CSV_SCHEMA_VERSION: int = 4
+const _CAMPAIGN_STAGE_COUNT: int = 5
+const _CAMPAIGN_FALLBACK_PROFILE_NAMES: Array[String] = [
+	"G33S33D34",
+	"G40S40D20",
+	"G25S50D25",
+	"G20S40D40",
+	"G25S25D50"
+]
 var _ai_profiles: Array = []
 var _schedule: Array = []
 var _schedule_mode: ScheduleMode = ScheduleMode.ROUND_ROBIN
@@ -108,14 +132,34 @@ var _match_frames: int = 0
 var _predations_by_player: Dictionary = {1: 0, 2: 0}
 var _feed_events_by_player: Dictionary = {1: 0, 2: 0}
 var _feed_by_player_species: Dictionary = {}
+var _fed_fish_by_player_species: Dictionary = {}
+var _feed_point_gain_by_player_species: Dictionary = {}
+var _feed_weight_gain_by_player_species: Dictionary = {}
 var _alive_exits_by_player_species: Dictionary = {}
 var _alive_exits_ge1_by_player_species: Dictionary = {}
 var _alive_exits_ge3_by_player_species: Dictionary = {}
 var _alive_exits_ge5_by_player_species: Dictionary = {}
 var _predated_deaths_by_player_species: Dictionary = {}
+var _self_predations_by_player_species: Dictionary = {}
+var _opponent_predations_by_player_species: Dictionary = {}
+var _contest_wins_by_player_species: Dictionary = {}
+var _contest_losses_by_player_species: Dictionary = {}
+var _contest_latency_sum_by_player_species: Dictionary = {}
+var _contest_latency_count_by_player_species: Dictionary = {}
+var _estimated_denied_opportunities_by_player_species: Dictionary = {}
 var _fish_lifecycle_by_id: Dictionary = {}
+var _contest_state_by_target_id: Dictionary = {}
+var _last_target_snapshot_by_fish_id: Dictionary = {}
+var _pending_denied_by_fish_id: Dictionary = {}
 var _awaiting_mode_selection: bool = true
 var _pellet_spawn_timer: float = 0.0
+var _is_local_two_player_mode: bool = false
+var _is_one_player_campaign_mode: bool = false
+var _controller_to_player: Dictionary = {}
+var _next_species_change_time_by_player: Dictionary = {1: 0.0, 2: 0.0}
+var _campaign_opponent_indices: Array[int] = []
+var _campaign_stage_index: int = 0
+var _campaign_pending_winner_player: int = 0
 
 
 ## Initializes runtime systems, caches geometry, builds HUD, and waits for mode selection.
@@ -140,6 +184,8 @@ func _ready() -> void:
 	_mode_overlay_node.mouse_filter = Control.MOUSE_FILTER_PASS
 	_btn_rr.pressed.connect(_begin_selected_mode.bind(ScheduleMode.ROUND_ROBIN))
 	_btn_fs.pressed.connect(_begin_selected_mode.bind(ScheduleMode.FOCUSED_SUITE))
+	_btn_2p.pressed.connect(_begin_selected_mode.bind(ScheduleMode.TWO_PLAYERS))
+	_btn_campaign.pressed.connect(_begin_selected_mode.bind(ScheduleMode.ONE_PLAYER_CAMPAIGN))
 
 
 ## Fails fast when critical Zoo scene dependencies are missing.
@@ -149,6 +195,7 @@ func _validate_scene_wiring() -> void:
 	assert(despawn_area != null, "Zoo scene missing DespawnArea node")
 	assert(score_p1_label != null and score_p2_label != null and count_label != null, "Zoo scene missing HUD labels")
 	assert(spawner_p1 != null and spawner_p2 != null, "Zoo scene missing spawners")
+	assert(_btn_rr != null and _btn_fs != null and _btn_2p != null and _btn_campaign != null, "Zoo scene missing mode selection buttons")
 	if get_node_or_null("/root/SpatialGrid") == null:
 		push_warning("Zoo expects SpatialGrid autoload to be configured.")
 
@@ -158,9 +205,19 @@ func _begin_selected_mode(mode: ScheduleMode) -> void:
 	if not _awaiting_mode_selection:
 		return
 	_awaiting_mode_selection = false
+	_controller_to_player.clear()
+	_next_species_change_time_by_player = {1: 0.0, 2: 0.0}
 	_schedule_mode = mode
 	_mode_overlay_node.hide()
+	if _schedule_mode == ScheduleMode.TWO_PLAYERS:
+		_start_local_two_player_match()
+		return
+	if _schedule_mode == ScheduleMode.ONE_PLAYER_CAMPAIGN:
+		_start_one_player_campaign()
+		return
 	_build_schedule()
+	_is_local_two_player_mode = false
+	_is_one_player_campaign_mode = false
 	print("Zoo: mode=%s profiles=%d laps=%d planned_matches=%d" % [
 		"RR" if _schedule_mode == ScheduleMode.ROUND_ROBIN else "FOCUSED",
 		_ai_profiles.size(),
@@ -173,19 +230,149 @@ func _begin_selected_mode(mode: ScheduleMode) -> void:
 
 ## Keyboard shortcut handling for mode selection overlay.
 func _input(event: InputEvent) -> void:
-	if not _awaiting_mode_selection:
+	if _awaiting_mode_selection:
+		if not (event is InputEventKey):
+			return
+		var key_event: InputEventKey = event as InputEventKey
+		if not key_event.pressed or key_event.echo:
+			return
+		if key_event.keycode == KEY_1 or key_event.keycode == KEY_KP_1 or key_event.physical_keycode == KEY_1 or key_event.unicode == 49:
+			_begin_selected_mode(ScheduleMode.ROUND_ROBIN)
+			get_viewport().set_input_as_handled()
+		elif key_event.keycode == KEY_2 or key_event.keycode == KEY_KP_2 or key_event.physical_keycode == KEY_2 or key_event.unicode == 50:
+			_begin_selected_mode(ScheduleMode.FOCUSED_SUITE)
+			get_viewport().set_input_as_handled()
+		elif key_event.keycode == KEY_3 or key_event.keycode == KEY_KP_3 or key_event.physical_keycode == KEY_3 or key_event.unicode == 51:
+			_begin_selected_mode(ScheduleMode.TWO_PLAYERS)
+			get_viewport().set_input_as_handled()
+		elif key_event.keycode == KEY_4 or key_event.keycode == KEY_KP_4 or key_event.physical_keycode == KEY_4 or key_event.unicode == 52:
+			_begin_selected_mode(ScheduleMode.ONE_PLAYER_CAMPAIGN)
+			get_viewport().set_input_as_handled()
 		return
-	if not (event is InputEventKey):
+
+	if (not _is_local_two_player_mode and not _is_one_player_campaign_mode) or not _match_active:
 		return
-	var key_event: InputEventKey = event as InputEventKey
-	if not key_event.pressed or key_event.echo:
+
+	if event is InputEventKey:
+		var local_key_event: InputEventKey = event as InputEventKey
+		if not local_key_event.pressed or local_key_event.echo:
+			return
+		if local_key_event.keycode == KEY_ENTER or local_key_event.keycode == KEY_KP_ENTER:
+			_return_to_mode_menu()
+			get_viewport().set_input_as_handled()
+			return
+		if local_key_event.keycode == KEY_SPACE:
+			_try_local_accept(1)
+			get_viewport().set_input_as_handled()
+			return
+		if local_key_event.keycode == KEY_KP_0:
+			if _is_local_two_player_mode:
+				_try_local_accept(2)
+				get_viewport().set_input_as_handled()
+			return
+		if local_key_event.keycode == KEY_W:
+			_try_local_species_step(1, -1)
+			get_viewport().set_input_as_handled()
+			return
+		if local_key_event.keycode == KEY_S:
+			_try_local_species_step(1, 1)
+			get_viewport().set_input_as_handled()
+			return
+		if local_key_event.keycode == KEY_UP:
+			if _is_local_two_player_mode:
+				_try_local_species_step(2, -1)
+				get_viewport().set_input_as_handled()
+			return
+		if local_key_event.keycode == KEY_DOWN:
+			if _is_local_two_player_mode:
+				_try_local_species_step(2, 1)
+				get_viewport().set_input_as_handled()
+			return
+
+	if event is InputEventJoypadButton:
+		var joy_button_event: InputEventJoypadButton = event as InputEventJoypadButton
+		if not joy_button_event.pressed:
+			return
+		if joy_button_event.button_index == JOY_BUTTON_START:
+			_return_to_mode_menu()
+			get_viewport().set_input_as_handled()
+			return
+		var player_from_button: int = _resolve_player_for_device(joy_button_event.device)
+		if player_from_button == 0:
+			return
+		if _is_one_player_campaign_mode and player_from_button != 1:
+			return
+		if joy_button_event.button_index == JOY_BUTTON_A or joy_button_event.button_index == JOY_BUTTON_RIGHT_SHOULDER:
+			_try_local_accept(player_from_button)
+			get_viewport().set_input_as_handled()
+			return
+		if joy_button_event.button_index == JOY_BUTTON_DPAD_UP:
+			_try_local_species_step(player_from_button, -1)
+			get_viewport().set_input_as_handled()
+			return
+		if joy_button_event.button_index == JOY_BUTTON_DPAD_DOWN:
+			_try_local_species_step(player_from_button, 1)
+			get_viewport().set_input_as_handled()
+			return
+
+	if event is InputEventJoypadMotion:
+		var joy_motion_event: InputEventJoypadMotion = event as InputEventJoypadMotion
+		if joy_motion_event.axis != JOY_AXIS_LEFT_Y:
+			return
+		var player_from_motion: int = _resolve_player_for_device(joy_motion_event.device)
+		if player_from_motion == 0:
+			return
+		if _is_one_player_campaign_mode and player_from_motion != 1:
+			return
+		if joy_motion_event.axis_value <= -0.55:
+			_try_local_species_step(player_from_motion, -1)
+			get_viewport().set_input_as_handled()
+		elif joy_motion_event.axis_value >= 0.55:
+			_try_local_species_step(player_from_motion, 1)
+			get_viewport().set_input_as_handled()
+
+
+## Assigns first two active joypads to player slots 1 and 2.
+func _resolve_player_for_device(device_id: int) -> int:
+	if device_id < 0:
+		return 0
+	if _controller_to_player.has(device_id):
+		return int(_controller_to_player.get(device_id, 0))
+	if _controller_to_player.size() >= 2:
+		return 0
+	var assigned_player: int = 1
+	for mapped_player: Variant in _controller_to_player.values():
+		if int(mapped_player) == 1:
+			assigned_player = 2
+			break
+	_controller_to_player[device_id] = assigned_player
+	return assigned_player
+
+
+## Returns true when the per-player species-flick cooldown has elapsed.
+func _consume_species_step_window(player_id: int) -> bool:
+	var now_seconds: float = float(Time.get_ticks_msec()) / 1000.0
+	var next_allowed: float = float(_next_species_change_time_by_player.get(player_id, 0.0))
+	if now_seconds < next_allowed:
+		return false
+	_next_species_change_time_by_player[player_id] = now_seconds + _SPECIES_FLICK_COOLDOWN_SECONDS
+	return true
+
+
+## Applies one local species step for the given player.
+func _try_local_species_step(player_id: int, direction: int) -> void:
+	if not _consume_species_step_window(player_id):
 		return
-	if key_event.keycode == KEY_1 or key_event.keycode == KEY_KP_1 or key_event.physical_keycode == KEY_1 or key_event.unicode == 49:
-		_begin_selected_mode(ScheduleMode.ROUND_ROBIN)
-		get_viewport().set_input_as_handled()
-	elif key_event.keycode == KEY_2 or key_event.keycode == KEY_KP_2 or key_event.physical_keycode == KEY_2 or key_event.unicode == 50:
-		_begin_selected_mode(ScheduleMode.FOCUSED_SUITE)
-		get_viewport().set_input_as_handled()
+	var target_spawner: Node2D = spawner_p1 if player_id == 1 else spawner_p2
+	if target_spawner != null and target_spawner.has_method("cycle_selected_species"):
+		target_spawner.call("cycle_selected_species", direction)
+
+
+## Attempts one local manual spawn request for the given player.
+func _try_local_accept(player_id: int) -> void:
+	var target_spawner: Node2D = spawner_p1 if player_id == 1 else spawner_p2
+	if target_spawner != null and target_spawner.has_method("request_spawn_accept"):
+		target_spawner.call("request_spawn_accept")
 
 
 ## Main loop: rebuild grid, run match systems, or advance reset timer.
@@ -195,6 +382,10 @@ func _process(delta: float) -> void:
 			_begin_selected_mode(ScheduleMode.ROUND_ROBIN)
 		elif Input.is_key_pressed(KEY_2) or Input.is_physical_key_pressed(KEY_2) or Input.is_key_pressed(KEY_KP_2):
 			_begin_selected_mode(ScheduleMode.FOCUSED_SUITE)
+		elif Input.is_key_pressed(KEY_3) or Input.is_physical_key_pressed(KEY_3) or Input.is_key_pressed(KEY_KP_3):
+			_begin_selected_mode(ScheduleMode.TWO_PLAYERS)
+		elif Input.is_key_pressed(KEY_4) or Input.is_physical_key_pressed(KEY_4) or Input.is_key_pressed(KEY_KP_4):
+			_begin_selected_mode(ScheduleMode.ONE_PLAYER_CAMPAIGN)
 		return
 	SpatialGrid.rebuild()
 	if _match_active:
@@ -204,6 +395,7 @@ func _process(delta: float) -> void:
 		_handle_spawner(delta, spawner_p1)
 		_handle_spawner(delta, spawner_p2)
 		_process_despawn_areas()
+		_sample_contested_targets()
 		_check_win_condition()
 	else:
 		_reset_timer -= delta
@@ -260,6 +452,8 @@ func _spawn_fish(fish_data: Dictionary) -> void:
 		"player": player_id,
 		"species": normalized_species,
 		"feeds": 0,
+		"point_gain_total": 0,
+		"weight_gain_total_g": 0.0,
 		"predated": false,
 		"alive_exit": false
 	}
@@ -484,9 +678,14 @@ func _random_point_in_pond() -> Vector2:
 
 
 ## Handles predation analytics and optional detritus generation from consumed prey.
-func _on_prey_predated(prey_position: Vector2, prey_weight_g: float, predator_player: int, prey_player: int, prey_species: StringName, prey_fish_id: int, prey_feed_count: int) -> void:
+func _on_prey_predated(prey_position: Vector2, prey_weight_g: float, predator_player: int, predator_species: StringName, _predator_fish_id: int, prey_player: int, prey_species: StringName, prey_fish_id: int, prey_feed_count: int, _absorbed_mass_g: float, _earned_points: int) -> void:
 	if predator_player == 1 or predator_player == 2:
 		_predations_by_player[predator_player] = int(_predations_by_player.get(predator_player, 0)) + 1
+		if _should_collect_diagnostics():
+			if predator_player == prey_player:
+				_increment_species_metric(_self_predations_by_player_species, predator_player, predator_species)
+			else:
+				_increment_species_metric(_opponent_predations_by_player_species, predator_player, predator_species)
 	if prey_player == 1 or prey_player == 2:
 		_increment_species_metric(_predated_deaths_by_player_species, prey_player, prey_species)
 		if _fish_lifecycle_by_id.has(prey_fish_id):
@@ -582,14 +781,23 @@ func _on_fish_exited(player_id: int, point_value: int, redeemed_biomass_g: float
 
 
 ## Tracks successful feed analytics by player/species.
-func _on_fish_feed_succeeded(player_id: int, fish_species: StringName, fish_id: int, feed_count: int) -> void:
+func _on_fish_feed_succeeded(player_id: int, fish_species: StringName, fish_id: int, feed_count: int, weight_gain_g: float, point_delta: int, target_fish_id: int, _target_species: StringName, _target_player_id: int) -> void:
 	if player_id != 1 and player_id != 2:
 		return
 	_feed_events_by_player[player_id] = int(_feed_events_by_player.get(player_id, 0)) + 1
 	_increment_species_metric(_feed_by_player_species, player_id, fish_species)
+	if _should_collect_diagnostics():
+		_add_species_metric_value(_feed_point_gain_by_player_species, player_id, fish_species, float(point_delta))
+		_add_species_metric_value(_feed_weight_gain_by_player_species, player_id, fish_species, weight_gain_g)
+		_resolve_contested_target(target_fish_id, player_id, fish_species, fish_id)
 	if _fish_lifecycle_by_id.has(fish_id):
 		var fish_entry: Dictionary = _fish_lifecycle_by_id[fish_id] as Dictionary
+		var previous_feeds: int = int(fish_entry.get("feeds", 0))
+		if _should_collect_diagnostics() and previous_feeds <= 0:
+			_increment_species_metric(_fed_fish_by_player_species, player_id, fish_species)
 		fish_entry["feeds"] = maxi(int(fish_entry.get("feeds", 0)), feed_count)
+		fish_entry["point_gain_total"] = int(fish_entry.get("point_gain_total", 0)) + point_delta
+		fish_entry["weight_gain_total_g"] = float(fish_entry.get("weight_gain_total_g", 0.0)) + weight_gain_g
 		_fish_lifecycle_by_id[fish_id] = fish_entry
 
 
@@ -675,6 +883,9 @@ func _update_ui() -> void:
 	var p2_score: int = int(round(float(score_by_player.get(2, 0.0))))
 	score_p1_label.text = "%s POINTS: %d" % [_p1_ai_name, p1_score]
 	score_p2_label.text = "%s POINTS: %d" % [_p2_ai_name, p2_score]
+	if _is_one_player_campaign_mode:
+		count_label.text = "CAMPAIGN STAGE %d/%d  |  %s vs %s  |  FISH %d  |  LEAD %d/%d pts" % [_campaign_stage_index + 1, maxi(1, _campaign_opponent_indices.size()), _p1_ai_name, _p2_ai_name, _live_fish_count(), absi(p1_score - p2_score), win_lead_points]
+		return
 	var lap: int = 1
 	if _schedule_index < _schedule.size():
 		lap = int(_schedule[_schedule_index].get("lap", 0)) + 1
@@ -808,6 +1019,7 @@ func _setup_player_hud(cl: CanvasLayer, base: Vector2, slots: Dictionary, styles
 		var panel: Panel = Panel.new()
 		panel.position = base + Vector2(0.0, float(i) * (_SLOT_HEIGHT + _SLOT_GAP))
 		panel.size = Vector2(_SLOT_WIDTH, _SLOT_HEIGHT)
+		panel.pivot_offset = panel.size * 0.5
 		var style: StyleBoxFlat = StyleBoxFlat.new()
 		style.bg_color = _COL_PANEL_BG
 		style.set_corner_radius_all(6)
@@ -880,9 +1092,17 @@ func _update_hud() -> void:
 	var sel2: StringName = spawner_p2.get("selected_species") as StringName
 	for species: StringName in _species_order:
 		if _hud_styles_p1.has(species):
-			(_hud_styles_p1[species] as StyleBoxFlat).border_color = _COL_SELECTED if species == sel1 else _COL_UNSELECTED
+			var style_p1: StyleBoxFlat = _hud_styles_p1[species] as StyleBoxFlat
+			style_p1.border_color = _COL_SELECTED if species == sel1 else _COL_UNSELECTED
+			style_p1.bg_color = _COL_PANEL_BG_SELECTED if species == sel1 else _COL_PANEL_BG
+		if _hud_slots_p1.has(species):
+			(_hud_slots_p1[species] as Panel).scale = Vector2.ONE * (1.10 if species == sel1 else 1.0)
 		if _hud_styles_p2.has(species):
-			(_hud_styles_p2[species] as StyleBoxFlat).border_color = _COL_SELECTED if species == sel2 else _COL_UNSELECTED
+			var style_p2: StyleBoxFlat = _hud_styles_p2[species] as StyleBoxFlat
+			style_p2.border_color = _COL_SELECTED if species == sel2 else _COL_UNSELECTED
+			style_p2.bg_color = _COL_PANEL_BG_SELECTED if species == sel2 else _COL_PANEL_BG
+		if _hud_slots_p2.has(species):
+			(_hud_slots_p2[species] as Panel).scale = Vector2.ONE * (1.10 if species == sel2 else 1.0)
 		if _hud_count_labels_p1.has(species):
 			(_hud_count_labels_p1[species] as Label).text = "x%d" % int(_spawns_p1.get(species, 0))
 		if _hud_count_labels_p2.has(species):
@@ -924,16 +1144,70 @@ func _end_round(winner_player: int) -> void:
 	_match_active = false
 	_reset_timer = _RESET_DELAY
 	var winner_ai: String = _p1_ai_name if winner_player == 1 else _p2_ai_name
+	if _is_one_player_campaign_mode:
+		_campaign_pending_winner_player = winner_player
 	if _win_label != null:
 		_win_label.text = "%s wins!" % winner_ai
 		_win_label.show()
-	_write_csv_row(winner_ai)
-	_write_round_metrics_row(winner_ai)
-	_write_spawn_sequences()
+	if not _is_local_two_player_mode and not _is_one_player_campaign_mode:
+		_write_csv_row(winner_ai)
+		_write_round_metrics_row(winner_ai)
+		_write_spawn_sequences()
+
+
+## Returns from active gameplay to mode selection and resets runtime state.
+func _return_to_mode_menu() -> void:
+	var children: Array = pond.get_children().duplicate()
+	for child: Node in children:
+		if child is Fish:
+			FishPool.release(child as Fish)
+	score_by_player = {1: 0.0, 2: 0.0}
+	_redeemed_biomass_by_player = {1: 0.0, 2: 0.0}
+	_spawns_p1 = _zero_species_counter()
+	_spawns_p2 = _zero_species_counter()
+	_spawn_seq_p1.clear()
+	_spawn_seq_p2.clear()
+	_spawn_seq_events_p1.clear()
+	_spawn_seq_events_p2.clear()
+	_fish_lifecycle_by_id.clear()
+	_pellet_spawn_timer = 0.0
+	_reset_match_analytics()
+	if spawner_p1 != null and spawner_p1.has_method("reset"):
+		spawner_p1.call("reset")
+	if spawner_p2 != null and spawner_p2.has_method("reset"):
+		spawner_p2.call("reset")
+	if spawner_p1 != null and spawner_p1.has_method("set_manual_control_enabled"):
+		spawner_p1.call("set_manual_control_enabled", false)
+	if spawner_p2 != null and spawner_p2.has_method("set_manual_control_enabled"):
+		spawner_p2.call("set_manual_control_enabled", false)
+	_awaiting_mode_selection = true
+	_is_local_two_player_mode = false
+	_is_one_player_campaign_mode = false
+	_controller_to_player.clear()
+	_next_species_change_time_by_player = {1: 0.0, 2: 0.0}
+	_match_active = false
+	_reset_timer = 0.0
+	_campaign_opponent_indices.clear()
+	_campaign_stage_index = 0
+	_campaign_pending_winner_player = 0
+	_schedule.clear()
+	_schedule_index = 0
+	if _mode_overlay_node != null:
+		_mode_overlay_node.show()
+	if _win_label != null:
+		_win_label.hide()
+	_p1_ai_name = "?"
+	_p2_ai_name = "?"
 
 
 ## Resets pond state and advances to the next scheduled match.
 func _do_reset() -> void:
+	if _is_local_two_player_mode:
+		_return_to_mode_menu()
+		return
+	if _is_one_player_campaign_mode:
+		_advance_campaign_after_round()
+		return
 	var children: Array = pond.get_children().duplicate()
 	for child: Node in children:
 		if child is Fish:
@@ -986,45 +1260,71 @@ func _write_csv_row(winner_ai: String) -> void:
 	var p2_biomass: float = float(_redeemed_biomass_by_player.get(2, 0.0))
 	var p1_efficiency: float = p1_points / maxf(1.0, p1_spent_total)
 	var p2_efficiency: float = p2_points / maxf(1.0, p2_spent_total)
-	var row: String = "%d,%d,%d,%s,%s,%s,%s,%s,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%.4f,%.4f" % [
-		_CSV_SCHEMA_VERSION,
-		_game_id,
-		int(entry.get("lap", 0)),
+	var total_feed_events: float = float(int(_feed_events_by_player.get(1, 0)) + int(_feed_events_by_player.get(2, 0)))
+	var total_feed_point_gain: float = _sum_player_species_metric(_feed_point_gain_by_player_species, 1) + _sum_player_species_metric(_feed_point_gain_by_player_species, 2)
+	var total_feed_weight_gain: float = _sum_player_species_metric(_feed_weight_gain_by_player_species, 1) + _sum_player_species_metric(_feed_weight_gain_by_player_species, 2)
+	var p1_avg_conversion_points: float = _safe_ratio(_sum_player_species_metric(_feed_point_gain_by_player_species, 1), float(_feed_events_by_player.get(1, 0)))
+	var p2_avg_conversion_points: float = _safe_ratio(_sum_player_species_metric(_feed_point_gain_by_player_species, 2), float(_feed_events_by_player.get(2, 0)))
+	var global_avg_conversion_points: float = _safe_ratio(total_feed_point_gain, total_feed_events)
+	var global_avg_conversion_weight: float = _safe_ratio(total_feed_weight_gain, total_feed_events)
+	var row_values: Array[String] = [
+		str(_CSV_SCHEMA_VERSION),
+		str(_game_id),
+		str(int(entry.get("lap", 0))),
 		_p1_ai_name,
 		_p2_ai_name,
 		_weights_to_compact_string(_p1_ai_weights),
 		_weights_to_compact_string(_p2_ai_weights),
 		winner_ai,
-		_match_elapsed_seconds,
-		_match_frames,
-		int(_spawns_p1.get(&"guppy", 0)),
-		int(_spawns_p1.get(&"sabalo", 0)),
-		int(_spawns_p1.get(&"dientudo", 0)),
-		int(_spawns_p2.get(&"guppy", 0)),
-		int(_spawns_p2.get(&"sabalo", 0)),
-		int(_spawns_p2.get(&"dientudo", 0)),
-		int(_feed_events_by_player.get(1, 0)),
-		int(_feed_events_by_player.get(2, 0)),
-		int(_predations_by_player.get(1, 0)),
-		int(_predations_by_player.get(2, 0)),
-		p1_spent_total,
-		p2_spent_total,
-		p1_points,
-		p2_points,
-		p1_biomass,
-		p2_biomass,
-		int(_species_metric_value(_alive_exits_ge5_by_player_species, 1, SpeciesRegistry.GUPPY)),
-		int(_species_metric_value(_alive_exits_ge5_by_player_species, 1, SpeciesRegistry.SABALO)),
-		int(_species_metric_value(_alive_exits_ge5_by_player_species, 1, SpeciesRegistry.DIENTUDO)),
-		int(_species_metric_value(_alive_exits_ge5_by_player_species, 2, SpeciesRegistry.GUPPY)),
-		int(_species_metric_value(_alive_exits_ge5_by_player_species, 2, SpeciesRegistry.SABALO)),
-		int(_species_metric_value(_alive_exits_ge5_by_player_species, 2, SpeciesRegistry.DIENTUDO)),
-		p1_efficiency,
-		p2_efficiency
+		"%.3f" % _match_elapsed_seconds,
+		str(_match_frames),
+		str(int(_spawns_p1.get(&"guppy", 0))),
+		str(int(_spawns_p1.get(&"sabalo", 0))),
+		str(int(_spawns_p1.get(&"dientudo", 0))),
+		str(int(_spawns_p2.get(&"guppy", 0))),
+		str(int(_spawns_p2.get(&"sabalo", 0))),
+		str(int(_spawns_p2.get(&"dientudo", 0))),
+		str(int(_feed_events_by_player.get(1, 0))),
+		str(int(_feed_events_by_player.get(2, 0))),
+		str(int(_predations_by_player.get(1, 0))),
+		str(int(_predations_by_player.get(2, 0))),
+		"%.0f" % p1_spent_total,
+		"%.0f" % p2_spent_total,
+		"%.0f" % p1_points,
+		"%.0f" % p2_points,
+		"%.0f" % p1_biomass,
+		"%.0f" % p2_biomass,
+		str(int(_species_metric_value(_alive_exits_ge5_by_player_species, 1, SpeciesRegistry.GUPPY))),
+		str(int(_species_metric_value(_alive_exits_ge5_by_player_species, 1, SpeciesRegistry.SABALO))),
+		str(int(_species_metric_value(_alive_exits_ge5_by_player_species, 1, SpeciesRegistry.DIENTUDO))),
+		str(int(_species_metric_value(_alive_exits_ge5_by_player_species, 2, SpeciesRegistry.GUPPY))),
+		str(int(_species_metric_value(_alive_exits_ge5_by_player_species, 2, SpeciesRegistry.SABALO))),
+		str(int(_species_metric_value(_alive_exits_ge5_by_player_species, 2, SpeciesRegistry.DIENTUDO))),
+		"%.4f" % p1_efficiency,
+		"%.4f" % p2_efficiency,
+		str(int(_sum_player_species_metric(_fed_fish_by_player_species, 1))),
+		str(int(_sum_player_species_metric(_fed_fish_by_player_species, 2))),
+		str(int(_sum_player_species_metric(_self_predations_by_player_species, 1))),
+		str(int(_sum_player_species_metric(_opponent_predations_by_player_species, 1))),
+		str(int(_sum_player_species_metric(_self_predations_by_player_species, 2))),
+		str(int(_sum_player_species_metric(_opponent_predations_by_player_species, 2))),
+		str(int(_sum_player_species_metric(_contest_wins_by_player_species, 1))),
+		str(int(_sum_player_species_metric(_contest_wins_by_player_species, 2))),
+		str(int(_sum_player_species_metric(_contest_losses_by_player_species, 1))),
+		str(int(_sum_player_species_metric(_contest_losses_by_player_species, 2))),
+		str(int(_sum_player_species_metric(_estimated_denied_opportunities_by_player_species, 1))),
+		str(int(_sum_player_species_metric(_estimated_denied_opportunities_by_player_species, 2))),
+		"%.4f" % _average_player_contest_latency(1),
+		"%.4f" % _average_player_contest_latency(2),
+		"%.4f" % p1_avg_conversion_points,
+		"%.4f" % p2_avg_conversion_points,
+		"%.4f" % global_avg_conversion_points,
+		"%.4f" % global_avg_conversion_weight
 	]
+	var row: String = ",".join(row_values)
 	file.store_line(row)
 	file.close()
-	print("Zoo: match=%d winner=%s duration=%.1fs points=%d/%d biomass=%dg/%dg efficiency=%.3f/%.3f" % [
+	print("Zoo: match=%d winner=%s duration=%.1fs points=%d/%d biomass=%dg/%dg efficiency=%.3f/%.3f contest=%d/%d pred(self/op)=%d/%d %d/%d conv=%.3f/%.3f all=%.3f" % [
 		_game_id,
 		winner_ai,
 		_match_elapsed_seconds,
@@ -1033,7 +1333,16 @@ func _write_csv_row(winner_ai: String) -> void:
 		int(round(p1_biomass)),
 		int(round(p2_biomass)),
 		p1_efficiency,
-		p2_efficiency
+		p2_efficiency,
+		int(_sum_player_species_metric(_contest_wins_by_player_species, 1)),
+		int(_sum_player_species_metric(_contest_wins_by_player_species, 2)),
+		int(_sum_player_species_metric(_self_predations_by_player_species, 1)),
+		int(_sum_player_species_metric(_opponent_predations_by_player_species, 1)),
+		int(_sum_player_species_metric(_self_predations_by_player_species, 2)),
+		int(_sum_player_species_metric(_opponent_predations_by_player_species, 2)),
+		p1_avg_conversion_points,
+		p2_avg_conversion_points,
+		global_avg_conversion_points
 	])
 
 
@@ -1046,21 +1355,34 @@ func _write_round_metrics_row(winner_ai: String) -> void:
 	file.seek_end()
 	for player_id: int in [1, 2]:
 		for species_name: StringName in _species_order:
-			var row: String = "%d,%d,%s,%s,%d,%s,%d,%d,%d,%d,%d,%d,%d" % [
-				_CSV_SCHEMA_VERSION,
-				_game_id,
+			var feed_events: int = int(_species_metric_value(_feed_by_player_species, player_id, species_name))
+			var row_values: Array[String] = [
+				str(_CSV_SCHEMA_VERSION),
+				str(_game_id),
 				winner_ai,
 				_p1_ai_name if player_id == 1 else _p2_ai_name,
-				player_id,
-				species_name,
-				int(_species_metric_value(_feed_by_player_species, player_id, species_name)),
-				int(_species_metric_value(_alive_exits_by_player_species, player_id, species_name)),
-				int(_species_metric_value(_alive_exits_ge1_by_player_species, player_id, species_name)),
-				int(_species_metric_value(_alive_exits_ge3_by_player_species, player_id, species_name)),
-				int(_species_metric_value(_alive_exits_ge5_by_player_species, player_id, species_name)),
-				int(_species_metric_value(_predated_deaths_by_player_species, player_id, species_name)),
-				int(_spawns_p1.get(species_name, 0)) if player_id == 1 else int(_spawns_p2.get(species_name, 0))
+				str(player_id),
+				String(species_name),
+				str(feed_events),
+				str(int(_species_metric_value(_fed_fish_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_alive_exits_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_alive_exits_ge1_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_alive_exits_ge3_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_alive_exits_ge5_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_predated_deaths_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_self_predations_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_opponent_predations_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_contest_wins_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_contest_losses_by_player_species, player_id, species_name))),
+				str(int(_species_metric_value(_estimated_denied_opportunities_by_player_species, player_id, species_name))),
+				"%.4f" % _average_species_contest_latency(player_id, species_name),
+				str(int(round(_species_metric_float_value(_feed_point_gain_by_player_species, player_id, species_name)))),
+				"%.4f" % _species_metric_float_value(_feed_weight_gain_by_player_species, player_id, species_name),
+				"%.4f" % _safe_ratio(_species_metric_float_value(_feed_point_gain_by_player_species, player_id, species_name), float(feed_events)),
+				"%.4f" % _safe_ratio(_species_metric_float_value(_feed_weight_gain_by_player_species, player_id, species_name), float(feed_events)),
+				str(int(_spawns_p1.get(species_name, 0)) if player_id == 1 else int(_spawns_p2.get(species_name, 0)))
 			]
+			var row: String = ",".join(row_values)
 			file.store_line(row)
 	file.close()
 
@@ -1144,11 +1466,129 @@ func _find_ai_profile_index(profile_name: String) -> int:
 	return -1
 
 
+## Reads historical results and returns ranked opponent profile names.
+func _rank_campaign_opponent_names_from_csv() -> Array[String]:
+	var file: FileAccess = FileAccess.open("user://playtests.csv", FileAccess.READ)
+	if file == null:
+		return []
+	var raw_text: String = file.get_as_text()
+	file.close()
+	if raw_text.strip_edges() == "":
+		return []
+	var lines: PackedStringArray = raw_text.split("\n", false)
+	if lines.size() < 2:
+		return []
+	var header_columns: PackedStringArray = lines[0].strip_edges().split(",")
+	var p1_idx: int = header_columns.find("p1_ai")
+	var p2_idx: int = header_columns.find("p2_ai")
+	var winner_idx: int = header_columns.find("winner_ai")
+	if p1_idx < 0 or p2_idx < 0 or winner_idx < 0:
+		return []
+	var stats_by_name: Dictionary = {}
+	for line_idx: int in range(1, lines.size()):
+		var row: String = String(lines[line_idx]).strip_edges()
+		if row == "":
+			continue
+		var columns: PackedStringArray = row.split(",")
+		var needed_index: int = maxi(p1_idx, maxi(p2_idx, winner_idx))
+		if columns.size() <= needed_index:
+			continue
+		var p1_name: String = String(columns[p1_idx]).strip_edges()
+		var p2_name: String = String(columns[p2_idx]).strip_edges()
+		var winner_name: String = String(columns[winner_idx]).strip_edges()
+		_register_campaign_result(stats_by_name, p1_name, p2_name, winner_name)
+
+	var ranked_entries: Array[Dictionary] = []
+	for profile_name_variant: Variant in stats_by_name.keys():
+		var profile_name: String = String(profile_name_variant)
+		if profile_name == "" or profile_name == "P1" or profile_name == "P2":
+			continue
+		if _find_ai_profile_index(profile_name) < 0:
+			continue
+		var metrics: Dictionary = stats_by_name[profile_name] as Dictionary
+		var wins: int = int(metrics.get("wins", 0))
+		var matches: int = int(metrics.get("matches", 0))
+		if matches <= 0:
+			continue
+		ranked_entries.append({
+			"name": profile_name,
+			"wins": wins,
+			"matches": matches,
+			"win_rate": float(wins) / float(matches)
+		})
+
+	ranked_entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var wins_a: int = int(a.get("wins", 0))
+		var wins_b: int = int(b.get("wins", 0))
+		if wins_a != wins_b:
+			return wins_a > wins_b
+		var rate_a: float = float(a.get("win_rate", 0.0))
+		var rate_b: float = float(b.get("win_rate", 0.0))
+		if absf(rate_a - rate_b) > 0.0001:
+			return rate_a > rate_b
+		return String(a.get("name", "")) < String(b.get("name", ""))
+	)
+
+	var top_names_descending: Array[String] = []
+	for entry: Dictionary in ranked_entries:
+		if top_names_descending.size() >= _CAMPAIGN_STAGE_COUNT:
+			break
+		top_names_descending.append(String(entry.get("name", "")))
+	top_names_descending.reverse()
+	return top_names_descending
+
+
+## Tracks match appearances and wins for campaign ranking.
+func _register_campaign_result(stats_by_name: Dictionary, p1_name: String, p2_name: String, winner_name: String) -> void:
+	for contender_name: String in [p1_name, p2_name]:
+		if contender_name == "":
+			continue
+		if not stats_by_name.has(contender_name):
+			stats_by_name[contender_name] = {"wins": 0, "matches": 0}
+		var contender_stats: Dictionary = stats_by_name[contender_name] as Dictionary
+		contender_stats["matches"] = int(contender_stats.get("matches", 0)) + 1
+		stats_by_name[contender_name] = contender_stats
+	if winner_name == "":
+		return
+	if not stats_by_name.has(winner_name):
+		stats_by_name[winner_name] = {"wins": 0, "matches": 0}
+	var winner_stats: Dictionary = stats_by_name[winner_name] as Dictionary
+	winner_stats["wins"] = int(winner_stats.get("wins", 0)) + 1
+	stats_by_name[winner_name] = winner_stats
+
+
+## Builds campaign opponent profile indices from CSV ranking with fallback defaults.
+func _build_campaign_opponent_indices() -> Array[int]:
+	var selected_indices: Array[int] = []
+	var ranked_names: Array[String] = _rank_campaign_opponent_names_from_csv()
+	for profile_name: String in ranked_names:
+		if selected_indices.size() >= _CAMPAIGN_STAGE_COUNT:
+			break
+		var profile_idx: int = _find_ai_profile_index(profile_name)
+		if profile_idx >= 0 and not selected_indices.has(profile_idx):
+			selected_indices.append(profile_idx)
+
+	for fallback_name: String in _CAMPAIGN_FALLBACK_PROFILE_NAMES:
+		if selected_indices.size() >= _CAMPAIGN_STAGE_COUNT:
+			break
+		var fallback_idx: int = _find_ai_profile_index(fallback_name)
+		if fallback_idx >= 0 and not selected_indices.has(fallback_idx):
+			selected_indices.append(fallback_idx)
+
+	for i: int in range(_ai_profiles.size()):
+		if selected_indices.size() >= _CAMPAIGN_STAGE_COUNT:
+			break
+		if not selected_indices.has(i):
+			selected_indices.append(i)
+
+	return selected_indices
+
+
 ## Initializes analytics CSV files and writes headers.
 func _init_csv_files() -> void:
 	var f1: FileAccess = FileAccess.open("user://playtests.csv", FileAccess.WRITE)
 	if f1 != null:
-		f1.store_line("schema_version,game_id,lap,p1_ai,p2_ai,p1_weights,p2_weights,winner_ai,match_seconds,match_frames,p1_guppy,p1_sabalo,p1_dientudo,p2_guppy,p2_sabalo,p2_dientudo,p1_feed_events,p2_feed_events,p1_predations,p2_predations,p1_resources_spent,p2_resources_spent,p1_score_points,p2_score_points,p1_redeemed_biomass_g,p2_redeemed_biomass_g,p1_guppy_alive_exit_ge5,p1_sabalo_alive_exit_ge5,p1_dientudo_alive_exit_ge5,p2_guppy_alive_exit_ge5,p2_sabalo_alive_exit_ge5,p2_dientudo_alive_exit_ge5,p1_points_per_resource,p2_points_per_resource")
+		f1.store_line("schema_version,game_id,lap,p1_ai,p2_ai,p1_weights,p2_weights,winner_ai,match_seconds,match_frames,p1_guppy,p1_sabalo,p1_dientudo,p2_guppy,p2_sabalo,p2_dientudo,p1_feed_events,p2_feed_events,p1_predations,p2_predations,p1_resources_spent,p2_resources_spent,p1_score_points,p2_score_points,p1_redeemed_biomass_g,p2_redeemed_biomass_g,p1_guppy_alive_exit_ge5,p1_sabalo_alive_exit_ge5,p1_dientudo_alive_exit_ge5,p2_guppy_alive_exit_ge5,p2_sabalo_alive_exit_ge5,p2_dientudo_alive_exit_ge5,p1_points_per_resource,p2_points_per_resource,p1_fed_fish,p2_fed_fish,p1_self_predations,p1_opponent_predations,p2_self_predations,p2_opponent_predations,p1_contest_wins,p2_contest_wins,p1_contest_losses,p2_contest_losses,p1_denied_opportunities_est,p2_denied_opportunities_est,p1_avg_contest_latency_s,p2_avg_contest_latency_s,p1_avg_conversion_points_per_feed,p2_avg_conversion_points_per_feed,global_avg_conversion_points_per_feed,global_avg_conversion_weight_gain_g_per_feed")
 		f1.close()
 		print("Zoo: playtests.csv -> ", ProjectSettings.globalize_path("user://playtests.csv"))
 	var f2: FileAccess = FileAccess.open("user://spawn_sequences.csv", FileAccess.WRITE)
@@ -1157,7 +1597,7 @@ func _init_csv_files() -> void:
 		f2.close()
 	var f3: FileAccess = FileAccess.open("user://round_metrics.csv", FileAccess.WRITE)
 	if f3 != null:
-		f3.store_line("schema_version,game_id,winner_ai,player_ai,player_id,species,feed_events,alive_exits,alive_exits_ge1,alive_exits_ge3,alive_exits_ge5,predated_deaths,spawns")
+		f3.store_line("schema_version,game_id,winner_ai,player_ai,player_id,species,feed_events,fed_fish,alive_exits,alive_exits_ge1,alive_exits_ge3,alive_exits_ge5,predated_deaths,self_predations,opponent_predations,contest_wins,contest_losses,denied_opportunities_est,avg_contest_latency_s,point_gain_total,weight_gain_total_g,avg_conversion_points_per_feed,avg_conversion_weight_gain_g_per_feed,spawns")
 		f3.close()
 
 
@@ -1166,6 +1606,12 @@ func _start_match() -> void:
 	var entry: Dictionary = _schedule[_schedule_index]
 	var p1_profile: Dictionary = _ai_profiles[int(entry["p1"])] as Dictionary
 	var p2_profile: Dictionary = _ai_profiles[int(entry["p2"])] as Dictionary
+	_is_local_two_player_mode = false
+	_is_one_player_campaign_mode = false
+	if spawner_p1 != null and spawner_p1.has_method("set_manual_control_enabled"):
+		spawner_p1.call("set_manual_control_enabled", false)
+	if spawner_p2 != null and spawner_p2.has_method("set_manual_control_enabled"):
+		spawner_p2.call("set_manual_control_enabled", false)
 	_p1_ai_name = p1_profile["name"] as String
 	_p2_ai_name = p2_profile["name"] as String
 	_p1_ai_weights = (p1_profile.get("weights", {}) as Dictionary).duplicate(true)
@@ -1176,6 +1622,116 @@ func _start_match() -> void:
 	if spawner_p2 != null and spawner_p2.has_method("configure_strategy"):
 		spawner_p2.call("configure_strategy", _p2_ai_name, p2_profile["weights"])
 	_match_active = true
+	_seed_startup_pellets()
+	_seed_startup_detritus()
+
+
+## Starts one-player campaign against top-ranked AI opponents.
+func _start_one_player_campaign() -> void:
+	_is_local_two_player_mode = false
+	_is_one_player_campaign_mode = true
+	_campaign_opponent_indices = _build_campaign_opponent_indices()
+	if _campaign_opponent_indices.is_empty():
+		push_warning("Zoo: no campaign opponents available.")
+		_return_to_mode_menu()
+		return
+	_campaign_stage_index = 0
+	_campaign_pending_winner_player = 0
+	_schedule.clear()
+	for stage: int in range(mini(_CAMPAIGN_STAGE_COUNT, _campaign_opponent_indices.size())):
+		_schedule.append({"lap": 0, "p1": - 1, "p2": _campaign_opponent_indices[stage]})
+	_start_campaign_stage(_campaign_stage_index)
+
+
+## Boots one campaign stage with manual player control versus AI profile opponent.
+func _start_campaign_stage(stage_index: int) -> void:
+	if stage_index < 0 or stage_index >= _campaign_opponent_indices.size():
+		_return_to_mode_menu()
+		return
+	_campaign_stage_index = stage_index
+	_schedule_index = stage_index
+	_campaign_pending_winner_player = 0
+	score_by_player = {1: 0.0, 2: 0.0}
+	_redeemed_biomass_by_player = {1: 0.0, 2: 0.0}
+	_spawns_p1 = _zero_species_counter()
+	_spawns_p2 = _zero_species_counter()
+	_spawn_seq_p1.clear()
+	_spawn_seq_p2.clear()
+	_spawn_seq_events_p1.clear()
+	_spawn_seq_events_p2.clear()
+	_fish_lifecycle_by_id.clear()
+	_pellet_spawn_timer = 0.0
+	_reset_match_analytics()
+	_p1_ai_name = "P1"
+	_p1_ai_weights = {}
+	var opponent_index: int = _campaign_opponent_indices[_campaign_stage_index]
+	var opponent_profile: Dictionary = _ai_profiles[opponent_index] as Dictionary
+	_p2_ai_name = String(opponent_profile.get("name", "AI"))
+	_p2_ai_weights = (opponent_profile.get("weights", {}) as Dictionary).duplicate(true)
+	if spawner_p1 != null and spawner_p1.has_method("reset"):
+		spawner_p1.call("reset")
+	if spawner_p2 != null and spawner_p2.has_method("reset"):
+		spawner_p2.call("reset")
+	if spawner_p1 != null and spawner_p1.has_method("set_manual_control_enabled"):
+		spawner_p1.call("set_manual_control_enabled", true)
+	if spawner_p2 != null and spawner_p2.has_method("set_manual_control_enabled"):
+		spawner_p2.call("set_manual_control_enabled", false)
+	if spawner_p2 != null and spawner_p2.has_method("configure_strategy"):
+		spawner_p2.call("configure_strategy", _p2_ai_name, opponent_profile.get("weights", {}))
+	_match_active = true
+	_reset_timer = 0.0
+	if _win_label != null:
+		_win_label.hide()
+	_seed_startup_pellets()
+	_seed_startup_detritus()
+
+
+## Advances campaign stage on win, or retries current stage on loss.
+func _advance_campaign_after_round() -> void:
+	if _campaign_pending_winner_player == 1:
+		var next_stage: int = _campaign_stage_index + 1
+		if next_stage >= mini(_CAMPAIGN_STAGE_COUNT, _campaign_opponent_indices.size()):
+			if _win_label != null:
+				_win_label.text = "Campaign complete!"
+				_win_label.show()
+			_return_to_mode_menu()
+			return
+		_start_campaign_stage(next_stage)
+		return
+	_start_campaign_stage(_campaign_stage_index)
+
+
+## Starts local two-player controller mode with manual species selection.
+func _start_local_two_player_match() -> void:
+	_is_local_two_player_mode = true
+	_is_one_player_campaign_mode = false
+	_schedule = [ {"lap": 0, "p1": - 1, "p2": - 1}]
+	_schedule_index = 0
+	score_by_player = {1: 0.0, 2: 0.0}
+	_redeemed_biomass_by_player = {1: 0.0, 2: 0.0}
+	_spawns_p1 = _zero_species_counter()
+	_spawns_p2 = _zero_species_counter()
+	_spawn_seq_p1.clear()
+	_spawn_seq_p2.clear()
+	_spawn_seq_events_p1.clear()
+	_spawn_seq_events_p2.clear()
+	_fish_lifecycle_by_id.clear()
+	_pellet_spawn_timer = 0.0
+	_reset_match_analytics()
+	_p1_ai_name = "P1"
+	_p2_ai_name = "P2"
+	_p1_ai_weights = {}
+	_p2_ai_weights = {}
+	if spawner_p1 != null and spawner_p1.has_method("reset"):
+		spawner_p1.call("reset")
+	if spawner_p2 != null and spawner_p2.has_method("reset"):
+		spawner_p2.call("reset")
+	if spawner_p1 != null and spawner_p1.has_method("set_manual_control_enabled"):
+		spawner_p1.call("set_manual_control_enabled", true)
+	if spawner_p2 != null and spawner_p2.has_method("set_manual_control_enabled"):
+		spawner_p2.call("set_manual_control_enabled", true)
+	_match_active = true
+	_reset_timer = 0.0
 	_seed_startup_pellets()
 	_seed_startup_detritus()
 
@@ -1237,12 +1793,25 @@ func _reset_match_analytics() -> void:
 	_predations_by_player = {1: 0, 2: 0}
 	_feed_events_by_player = {1: 0, 2: 0}
 	_feed_by_player_species = _new_player_species_metrics()
+	_fed_fish_by_player_species = _new_player_species_metrics()
+	_feed_point_gain_by_player_species = _new_player_species_metrics()
+	_feed_weight_gain_by_player_species = _new_player_species_metrics()
 	_alive_exits_by_player_species = _new_player_species_metrics()
 	_alive_exits_ge1_by_player_species = _new_player_species_metrics()
 	_alive_exits_ge3_by_player_species = _new_player_species_metrics()
 	_alive_exits_ge5_by_player_species = _new_player_species_metrics()
 	_predated_deaths_by_player_species = _new_player_species_metrics()
+	_self_predations_by_player_species = _new_player_species_metrics()
+	_opponent_predations_by_player_species = _new_player_species_metrics()
+	_contest_wins_by_player_species = _new_player_species_metrics()
+	_contest_losses_by_player_species = _new_player_species_metrics()
+	_contest_latency_sum_by_player_species = _new_player_species_metrics()
+	_contest_latency_count_by_player_species = _new_player_species_metrics()
+	_estimated_denied_opportunities_by_player_species = _new_player_species_metrics()
 	_fish_lifecycle_by_id.clear()
+	_contest_state_by_target_id.clear()
+	_last_target_snapshot_by_fish_id.clear()
+	_pending_denied_by_fish_id.clear()
 	_spawn_seq_events_p1.clear()
 	_spawn_seq_events_p2.clear()
 
@@ -1264,12 +1833,31 @@ func _increment_species_metric(metrics: Dictionary, player_id: int, species_name
 	metrics[player_id] = per_species
 
 
+## Adds an arbitrary numeric amount to one player/species metric bucket.
+func _add_species_metric_value(metrics: Dictionary, player_id: int, species_name: StringName, amount: float) -> void:
+	if amount == 0.0:
+		return
+	if not metrics.has(player_id):
+		metrics[player_id] = _zero_species_counter()
+	var per_species: Dictionary = metrics[player_id] as Dictionary
+	per_species[species_name] = float(per_species.get(species_name, 0.0)) + amount
+	metrics[player_id] = per_species
+
+
 ## Reads one player/species metric value with safe default.
 func _species_metric_value(metrics: Dictionary, player_id: int, species_name: StringName) -> int:
 	if not metrics.has(player_id):
 		return 0
 	var per_species: Dictionary = metrics[player_id] as Dictionary
 	return int(per_species.get(species_name, 0))
+
+
+## Reads one player/species metric as float with safe default.
+func _species_metric_float_value(metrics: Dictionary, player_id: int, species_name: StringName) -> float:
+	if not metrics.has(player_id):
+		return 0.0
+	var per_species: Dictionary = metrics[player_id] as Dictionary
+	return float(per_species.get(species_name, 0.0))
 
 
 ## Tracks alive exits split by minimum feed-count thresholds.
@@ -1281,6 +1869,233 @@ func _register_alive_exit(player_id: int, species_name: StringName, feed_count: 
 		_increment_species_metric(_alive_exits_ge3_by_player_species, player_id, species_name)
 	if feed_count >= 5:
 		_increment_species_metric(_alive_exits_ge5_by_player_species, player_id, species_name)
+
+
+## Returns true when extended match diagnostics should accumulate this frame.
+func _should_collect_diagnostics() -> bool:
+	return enable_match_diagnostics and _match_active and not _awaiting_mode_selection
+
+
+## Samples active feed targets to classify contested resources across players.
+func _sample_contested_targets() -> void:
+	if not _should_collect_diagnostics():
+		return
+	var now: float = _match_elapsed_seconds
+	_prune_pending_denied_opportunities(now)
+	var previous_targets: Dictionary = _last_target_snapshot_by_fish_id.duplicate(true)
+	var current_targets: Dictionary = {}
+	for child: Node in pond.get_children():
+		if not (child is Fish):
+			continue
+		var fish: Fish = child as Fish
+		if fish.pending_remove:
+			continue
+		if fish.species == SpeciesRegistry.PELLET or fish.species == SpeciesRegistry.DETRITUS:
+			continue
+		var target: Fish = fish.get_diagnostic_feed_target()
+		if target == null or not is_instance_valid(target) or target.pending_remove:
+			continue
+		var distance_px: float = fish.global_position.distance_to(target.global_position)
+		if distance_px > diagnostics_contest_distance_threshold_px:
+			continue
+		var fish_id: int = fish.get_instance_id()
+		var target_id: int = target.get_instance_id()
+		current_targets[fish_id] = {
+			"target_id": target_id,
+			"player": fish.player,
+			"species": fish.species,
+			"time_s": now
+		}
+		_register_target_contender(target, fish, distance_px, now)
+	_queue_abandoned_target_opportunities(previous_targets, current_targets, now)
+	_last_target_snapshot_by_fish_id = current_targets
+	_prune_contest_states(now)
+
+
+## Stores one contender observation against the target currently being pursued.
+func _register_target_contender(target: Fish, fish: Fish, distance_px: float, now: float) -> void:
+	var target_id: int = target.get_instance_id()
+	var target_owner: int = 0
+	if target.species != SpeciesRegistry.PELLET and target.species != SpeciesRegistry.DETRITUS:
+		target_owner = target.player
+	var state: Dictionary = _contest_state_by_target_id.get(target_id, {
+		"target_species": target.species,
+		"target_player": target_owner,
+		"first_seen_s": now,
+		"first_contested_s": - 1.0,
+		"last_seen_s": now,
+		"contenders": {}
+	}) as Dictionary
+	var contenders: Dictionary = state.get("contenders", {}) as Dictionary
+	contenders[fish.get_instance_id()] = {
+		"player": fish.player,
+		"species": fish.species,
+		"distance_px": distance_px,
+		"last_seen_s": now
+	}
+	state["contenders"] = contenders
+	state["last_seen_s"] = now
+	if _count_contesting_players(contenders) >= 2 and float(state.get("first_contested_s", -1.0)) < 0.0:
+		state["first_contested_s"] = now
+	_contest_state_by_target_id[target_id] = state
+
+
+## Queues dropped contested targets so later opponent consumption can count as denied opportunity.
+func _queue_abandoned_target_opportunities(previous_targets: Dictionary, current_targets: Dictionary, now: float) -> void:
+	for fish_id_variant: Variant in previous_targets.keys():
+		var fish_id: int = int(fish_id_variant)
+		var previous_snapshot: Dictionary = previous_targets[fish_id] as Dictionary
+		var previous_target_id: int = int(previous_snapshot.get("target_id", 0))
+		if previous_target_id <= 0:
+			continue
+		var current_snapshot: Dictionary = current_targets.get(fish_id, {}) as Dictionary
+		var current_target_id: int = int(current_snapshot.get("target_id", 0))
+		if current_target_id == previous_target_id:
+			continue
+		if not _contest_state_by_target_id.has(previous_target_id):
+			continue
+		var state: Dictionary = _contest_state_by_target_id[previous_target_id] as Dictionary
+		if not _state_has_opposing_contest(state, int(previous_snapshot.get("player", 0))):
+			continue
+		_pending_denied_by_fish_id[fish_id] = {
+			"target_id": previous_target_id,
+			"player": int(previous_snapshot.get("player", 0)),
+			"species": previous_snapshot.get("species", SpeciesRegistry.DEFAULT_SPECIES) as StringName,
+			"expires_at": now + diagnostics_denied_opportunity_window_seconds
+		}
+
+
+## Resolves a consumed contested target into win/loss/latency and pending denied metrics.
+func _resolve_contested_target(target_fish_id: int, winner_player: int, winner_species: StringName, winner_fish_id: int) -> void:
+	if not _should_collect_diagnostics():
+		return
+	_clear_pending_denied_for_fish(winner_fish_id)
+	_clear_target_snapshots_for_target(target_fish_id)
+	if target_fish_id <= 0 or not _contest_state_by_target_id.has(target_fish_id):
+		return
+	var now: float = _match_elapsed_seconds
+	var state: Dictionary = _contest_state_by_target_id[target_fish_id] as Dictionary
+	var contenders: Dictionary = state.get("contenders", {}) as Dictionary
+	if _count_contesting_players(contenders) >= 2:
+		_increment_species_metric(_contest_wins_by_player_species, winner_player, winner_species)
+		var first_contested_s: float = float(state.get("first_contested_s", -1.0))
+		if first_contested_s >= 0.0:
+			_add_species_metric_value(_contest_latency_sum_by_player_species, winner_player, winner_species, maxf(0.0, now - first_contested_s))
+			_increment_species_metric(_contest_latency_count_by_player_species, winner_player, winner_species)
+		for contender_fish_id_variant: Variant in contenders.keys():
+			var contender_fish_id: int = int(contender_fish_id_variant)
+			if contender_fish_id == winner_fish_id:
+				continue
+			var contender: Dictionary = contenders[contender_fish_id] as Dictionary
+			var contender_player: int = int(contender.get("player", 0))
+			if contender_player == winner_player:
+				continue
+			_increment_species_metric(_contest_losses_by_player_species, contender_player, contender.get("species", SpeciesRegistry.DEFAULT_SPECIES) as StringName)
+	_resolve_pending_denied_for_target(target_fish_id, winner_player, now)
+	_contest_state_by_target_id.erase(target_fish_id)
+
+
+## Drops contest states once contenders expire beyond the configured time window.
+func _prune_contest_states(now: float) -> void:
+	for target_id_variant: Variant in _contest_state_by_target_id.keys():
+		var target_id: int = int(target_id_variant)
+		var state: Dictionary = _contest_state_by_target_id[target_id] as Dictionary
+		var contenders: Dictionary = state.get("contenders", {}) as Dictionary
+		for contender_fish_id_variant: Variant in contenders.keys():
+			var contender_fish_id: int = int(contender_fish_id_variant)
+			var contender: Dictionary = contenders[contender_fish_id] as Dictionary
+			if now - float(contender.get("last_seen_s", -9999.0)) > diagnostics_contest_window_seconds:
+				contenders.erase(contender_fish_id)
+		if contenders.is_empty() and now - float(state.get("last_seen_s", 0.0)) > diagnostics_contest_window_seconds:
+			_contest_state_by_target_id.erase(target_id)
+			continue
+		state["contenders"] = contenders
+		_contest_state_by_target_id[target_id] = state
+
+
+## Removes expired pending denied-opportunity candidates.
+func _prune_pending_denied_opportunities(now: float) -> void:
+	for fish_id_variant: Variant in _pending_denied_by_fish_id.keys():
+		var fish_id: int = int(fish_id_variant)
+		var pending: Dictionary = _pending_denied_by_fish_id[fish_id] as Dictionary
+		if now > float(pending.get("expires_at", -1.0)):
+			_pending_denied_by_fish_id.erase(fish_id)
+
+
+## Returns true when a target state includes at least one opposing contender.
+func _state_has_opposing_contest(state: Dictionary, player_id: int) -> bool:
+	var contenders: Dictionary = state.get("contenders", {}) as Dictionary
+	for contender_variant: Variant in contenders.values():
+		var contender: Dictionary = contender_variant as Dictionary
+		if int(contender.get("player", 0)) != player_id:
+			return true
+	return false
+
+
+## Counts unique players currently contesting the same target.
+func _count_contesting_players(contenders: Dictionary) -> int:
+	var seen_players: Dictionary = {}
+	for contender_variant: Variant in contenders.values():
+		var contender: Dictionary = contender_variant as Dictionary
+		seen_players[int(contender.get("player", 0))] = true
+	return seen_players.size()
+
+
+## Clears target snapshots for fish that were still pointing at a resolved target.
+func _clear_target_snapshots_for_target(target_fish_id: int) -> void:
+	if target_fish_id <= 0:
+		return
+	for fish_id_variant: Variant in _last_target_snapshot_by_fish_id.keys():
+		var fish_id: int = int(fish_id_variant)
+		var snapshot: Dictionary = _last_target_snapshot_by_fish_id[fish_id] as Dictionary
+		if int(snapshot.get("target_id", 0)) == target_fish_id:
+			_last_target_snapshot_by_fish_id.erase(fish_id)
+
+
+## Clears pending denied-opportunity bookkeeping for one fish after a successful consumption.
+func _clear_pending_denied_for_fish(fish_id: int) -> void:
+	if _pending_denied_by_fish_id.has(fish_id):
+		_pending_denied_by_fish_id.erase(fish_id)
+
+
+## Converts pending dropped-target records into estimated denied opportunities when opponents consume first.
+func _resolve_pending_denied_for_target(target_fish_id: int, winner_player: int, now: float) -> void:
+	for fish_id_variant: Variant in _pending_denied_by_fish_id.keys():
+		var fish_id: int = int(fish_id_variant)
+		var pending: Dictionary = _pending_denied_by_fish_id[fish_id] as Dictionary
+		if int(pending.get("target_id", 0)) != target_fish_id:
+			continue
+		if now <= float(pending.get("expires_at", -1.0)) and int(pending.get("player", 0)) != winner_player:
+			_increment_species_metric(_estimated_denied_opportunities_by_player_species, int(pending.get("player", 0)), pending.get("species", SpeciesRegistry.DEFAULT_SPECIES) as StringName)
+		_pending_denied_by_fish_id.erase(fish_id)
+
+
+## Sums all species buckets for one player metric dictionary.
+func _sum_player_species_metric(metrics: Dictionary, player_id: int) -> float:
+	if not metrics.has(player_id):
+		return 0.0
+	var total: float = 0.0
+	var per_species: Dictionary = metrics[player_id] as Dictionary
+	for value: Variant in per_species.values():
+		total += float(value)
+	return total
+
+
+## Computes a zero-safe ratio for derived diagnostics.
+func _safe_ratio(numerator: float, denominator: float) -> float:
+	if denominator <= 0.0:
+		return 0.0
+	return numerator / denominator
+
+
+## Returns average contest win latency across all species for a player.
+func _average_player_contest_latency(player_id: int) -> float:
+	return _safe_ratio(_sum_player_species_metric(_contest_latency_sum_by_player_species, player_id), _sum_player_species_metric(_contest_latency_count_by_player_species, player_id))
+
+
+## Returns average contest win latency for one player/species bucket.
+func _average_species_contest_latency(player_id: int, species_name: StringName) -> float:
+	return _safe_ratio(_species_metric_float_value(_contest_latency_sum_by_player_species, player_id, species_name), _species_metric_float_value(_contest_latency_count_by_player_species, player_id, species_name))
 
 
 ## Records ordered spawn events and spent-resource ratios for sequence analytics.

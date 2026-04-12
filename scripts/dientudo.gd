@@ -4,7 +4,7 @@ class_name Dientudo
 ## Predator fish with a simple hunt state machine (IDLE/CHASING).
 ## Consuming prey grants points in 50 g chunks and adds digestion cooldown mass.
 
-signal prey_predated(prey_position: Vector2, prey_weight_g: float, predator_player: int, prey_player: int, prey_species: StringName, prey_fish_id: int, prey_feed_count: int)
+signal prey_predated(prey_position: Vector2, prey_weight_g: float, predator_player: int, predator_species: StringName, predator_fish_id: int, prey_player: int, prey_species: StringName, prey_fish_id: int, prey_feed_count: int, absorbed_mass_g: float, earned_points: int)
 
 enum HuntState {
 	IDLE,
@@ -28,16 +28,14 @@ var target_prey: Fish = null
 @export_range(0.0, 1.0, 0.01) var roam_center_bias_strength: float = 0.45
 
 @export_group("Dientudo: Exit")
-## Radius where young dientudos avoid the despawn zone.
-@export var despawner_avoid_radius: float = 220.0
-## Steering multiplier while avoiding the despawn zone.
-@export var despawner_avoid_force_multiplier: float = 2.1
 ## Strength multiplier for age-ramped descend pull.
 @export var descend_bias_strength_multiplier: float = 1.15
 
 @export_group("Dientudo: Digestion")
 ## Digested mass per second after consuming prey.
 @export var digestion_speed_g_per_sec: float = 30.0
+## Fraction of prey mass converted into predator growth and digestion backlog.
+@export_range(0.0, 1.0, 0.01) var prey_mass_absorption_ratio: float = 0.5
 ## Remaining digesting mass that blocks repeated hunts.
 var digesting_mass_remaining_g: float = 0.0
 ## Heading accumulator used by random wander.
@@ -58,10 +56,9 @@ func _apply_species_defaults() -> void:
 	var species_data: Dictionary = SpeciesDB.get_species(species)
 	chase_steering_multiplier = float(species_data.get("chase_steering_multiplier", chase_steering_multiplier))
 	roam_center_bias_strength = float(species_data.get("roam_center_bias_strength", roam_center_bias_strength))
-	despawner_avoid_radius = float(species_data.get("despawner_avoid_radius", despawner_avoid_radius))
-	despawner_avoid_force_multiplier = float(species_data.get("despawner_avoid_force_multiplier", despawner_avoid_force_multiplier))
 	descend_bias_strength_multiplier = float(species_data.get("descend_bias_strength_multiplier", descend_bias_strength_multiplier))
 	digestion_speed_g_per_sec = float(species_data.get("digestion_speed_g_per_sec", digestion_speed_g_per_sec))
+	prey_mass_absorption_ratio = float(species_data.get("prey_mass_absorption_ratio", prey_mass_absorption_ratio))
 
 
 ## Resets hunt and digestion runtime state when reused from pool.
@@ -164,9 +161,8 @@ func _compute_acceleration(delta: float) -> Vector2:
 		return _steer_towards(get_escape_vector()) * 2.0
 	if behavior_state == BehaviorState.DESCEND:
 		var descend_bias: Vector2 = _compute_guppy_style_age_despawn_bias(descend_bias_strength_multiplier)
-		var avoid_despawner: Vector2 = _compute_guppy_style_despawner_avoidance(despawner_avoid_radius, despawner_avoid_force_multiplier, 0.16)
 		var glide: Vector2 = (_compute_boid_steering(boid_neighbors) * 0.35) + (_compute_wander(delta) * 0.45)
-		return glide + descend_bias + avoid_despawner
+		return glide + descend_bias
 
 	if behavior_state == BehaviorState.FEED and target_prey != null and is_instance_valid(target_prey):
 		return _compute_hunt_acceleration(delta)
@@ -218,18 +214,25 @@ func _consume_prey(prey: Fish) -> void:
 	var prey_species: StringName = prey.species
 	var prey_fish_id: int = prey.get_instance_id()
 	var prey_feed_count: int = prey.get_successful_feed_count()
-	var absorbed_mass: float = prey_weight * 0.1
+	var absorbed_mass: float = prey_weight * clampf(prey_mass_absorption_ratio, 0.0, 1.0)
 	point_mass_remainder_g += prey_weight
 	var earned_points: int = int(floor(point_mass_remainder_g / 50.0))
 	if earned_points > 0:
 		add_points(earned_points)
 		point_mass_remainder_g -= float(earned_points) * 50.0
+	set_pending_feed_diagnostics(earned_points, prey)
 	mark_successful_feed(absorbed_mass)
 	digesting_mass_remaining_g += absorbed_mass
-	prey_predated.emit(prey_position, prey_weight, player, prey_player, prey_species, prey_fish_id, prey_feed_count)
+	prey_predated.emit(prey_position, prey_weight, player, species, get_instance_id(), prey_player, prey_species, prey_fish_id, prey_feed_count, absorbed_mass, earned_points)
 
 	prey.pending_remove = true
 	FishPool.release(prey)
+
+
+func get_diagnostic_feed_target() -> Fish:
+	if target_prey == null or not is_instance_valid(target_prey) or target_prey.pending_remove:
+		return null
+	return target_prey
 
 
 ## Blends random wander with center bias to keep movement distributed in-pond.

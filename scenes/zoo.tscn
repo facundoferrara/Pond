@@ -87,7 +87,7 @@ anchor_bottom = 0.0
 offset_left = -300.0
 offset_top = 16.0
 offset_right = 300.0
-offset_bottom = 416.0
+offset_bottom = 512.0
 
 [node name="BtnRoundRobin" type="Button" parent="CanvasLayer/ModeOverlay"]
 offset_left = 80.0
@@ -102,3 +102,17 @@ offset_top = 216.0
 offset_right = 520.0
 offset_bottom = 288.0
 text = "2  -  Focused Suite  (9 games)"
+
+[node name="BtnTwoPlayers" type="Button" parent="CanvasLayer/ModeOverlay"]
+offset_left = 80.0
+offset_top = 312.0
+offset_right = 520.0
+offset_bottom = 384.0
+text = "3  -  2 Players"
+
+[node name="BtnCampaign" type="Button" parent="CanvasLayer/ModeOverlay"]
+offset_left = 80.0
+offset_top = 408.0
+offset_right = 520.0
+offset_bottom = 480.0
+text = "4  -  1 Player Campaign"
