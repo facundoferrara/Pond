@@ -3,10 +3,10 @@ class_name Fish
 
 ## Shared base class for active pond entities (fish, pellet, detritus).
 ## Lifecycle is pool-based: acquire -> configure_from_zoo -> reinitialize -> release.
-## Zoo listens to fish_exited/feed_succeeded for scoring and analytics.
+## Zoo listens to fish_exited/feed_succeeded for ecosystem analytics.
 
-signal fish_exited(player_id: int, point_value: int, redeemed_biomass_g: float, fish_id: int, fish_species: StringName, feed_count: int)
-signal feed_succeeded(player_id: int, fish_species: StringName, fish_id: int, feed_count: int, weight_gain_g: float, point_delta: int, target_fish_id: int, target_species: StringName, target_player_id: int)
+signal fish_exited(fish_id: int, fish_species: StringName, feed_count: int, biomass_g: float)
+signal feed_succeeded(feeder_species: StringName, feeder_id: int, feed_count: int, weight_gain_g: float, target_fish_id: int)
 
 enum BehaviorState {
 	SCHOOL,
@@ -20,8 +20,6 @@ enum BehaviorState {
 @export_group("Identity")
 ## Species identifier used to fetch defaults and route pooling.
 @export var species: StringName = SpeciesDB.GUPPY
-## Owning player index used for scoring and ally checks.
-@export_range(1, 2) var player: int = 1
 ## Base tint applied to the fish sprite.
 @export var color: Color = Color(1.0, 1.0, 1.0, 1.0)
 
@@ -42,12 +40,6 @@ enum BehaviorState {
 @export var is_predator: bool = false
 ## Max prey ratio this fish can consume (prey <= weight * ratio).
 @export_range(0.05, 1.0, 0.05) var prey_weight_ratio_limit: float = 0.5
-
-@export_group("Scoring")
-## Baseline point value when the fish enters play.
-@export var starting_point_value: int = 0
-## Current point value contributed to player score on exit.
-@export var point_value: int = 0
 
 @export_group("Sensing And Steering")
 ## Radius used for boid neighbor detection.
@@ -72,10 +64,6 @@ enum BehaviorState {
 @export var hunger_rate: float = 1.2
 ## Catch/eat interaction distance.
 @export var eat_radius: float = 15.0
-## Duration of strong center bias after spawn.
-@export var spawn_center_bias_seconds: float = 3.0
-## Steering multiplier while spawn center bias is active.
-@export var spawn_center_bias_strength: float = 3.5
 ## Max white-mix amount applied at end of lifespan.
 @export_range(0.0, 1.0, 0.01) var age_whiten_max_ratio: float = 0.2
 ## Predator size ratio required to force flee override.
@@ -116,79 +104,59 @@ var pond_bounds: Rect2 = Rect2(Vector2.ZERO, Vector2(1280.0, 720.0))
 var out_boundary_polygon: PackedVector2Array = PackedVector2Array()
 var previous_global_position: Vector2 = Vector2.ZERO
 var warned_facing_no_motion: bool = false
-var source_spawner: NodePath = NodePath()
-var spawner_repel_radius: float = 238.0
-var spawner_repel_force_multiplier: float = 1.8
-
-## Cached spawner nodes, populated on first use (spawners outlive all fish).
-var _cached_spawners: Array[Node2D] = []
 ## Centroid of out_boundary_polygon, computed once in configure_out_boundary().
 var _cached_pond_center: Vector2 = Vector2.ZERO
 var _pond_center_valid: bool = false
+## Pre-computed boundary segment midpoints for broadphase rejection in nearest-point queries.
+var _boundary_segment_midpoints: PackedVector2Array = PackedVector2Array()
+## Pre-computed boundary segment half-lengths paired with _boundary_segment_midpoints.
+var _boundary_segment_half_lengths: PackedFloat32Array = PackedFloat32Array()
 ## Per-fish frame offset so context updates are staggered across the population.
 var _context_frame_offset: int = 0
-## Remaining time of forced center-seeking after spawn.
-var _spawn_center_bias_remaining: float = 0.0
 ## Number of successful feeding events during this fish lifecycle.
 var _successful_feed_count: int = 0
-var _pending_feed_point_delta: int = 0
 var _pending_feed_target: Fish = null
 
-const _CONTEXT_UPDATE_INTERVAL: int = 3
+const _CONTEXT_UPDATE_INTERVAL: int = 10
 
 
-## Registers fish and initializes species defaults plus starting velocity/visuals.
+## Registers fish and initializes species defaults plus visuals.
 func _ready() -> void:
 	add_to_group("fish")
 	_context_frame_offset = randi() % _CONTEXT_UPDATE_INTERVAL
 	_apply_species_defaults()
-	if velocity == Vector2.ZERO:
-		velocity = Vector2.RIGHT.rotated(randf_range(-0.55, 0.55)) * top_speed * 0.35
 	previous_global_position = global_position
 	_refresh_visual()
 	_refresh_scale()
 
 
 ## Resets runtime state so a pooled fish can be re-used without re-instantiation.
-## Call AFTER configure_from_zoo() so top_speed is already set from species data.
+## Call AFTER configure_from_zoo() so species defaults are already applied.
 func reinitialize() -> void:
 	pending_remove = false
 	is_out_of_game = false
 	age_seconds = 0.0
 	_successful_feed_count = 0
-	_pending_feed_point_delta = 0
 	_pending_feed_target = null
-	point_value = starting_point_value
 	age_speed_multiplier = 1.0
 	boid_neighbors.clear()
 	nearest_predator = null
 	behavior_state = BehaviorState.SCHOOL
 	warned_facing_no_motion = false
+	velocity = Vector2.ZERO
 	saturation_ratio = clampf(starting_saturation_ratio, 0.0, 1.0)
-	_spawn_center_bias_remaining = maxf(0.0, spawn_center_bias_seconds)
-	var toward_center: Vector2 = _pond_center_point() - global_position
-	if toward_center.length_squared() <= 0.000001:
-		toward_center = Vector2.RIGHT.rotated(randf_range(-0.55, 0.55))
-	velocity = toward_center.normalized().rotated(randf_range(-0.18, 0.18)) * top_speed * 0.35
-	global_rotation = velocity.angle()
 	previous_global_position = global_position
 
 
 ## Applies per-spawn ownership/tint/bounds and refreshes species-driven defaults.
-func configure_from_zoo(species_name: StringName, owner_player: int, tint: Color, bounds: Rect2) -> void:
+func configure_from_zoo(species_name: StringName, tint: Color, bounds: Rect2) -> void:
 	species = species_name
-	player = owner_player
 	color = tint
 	pond_bounds = bounds
 	previous_global_position = global_position
 	_apply_species_defaults()
 	_refresh_visual()
 	_refresh_scale()
-
-
-func set_source_spawner(spawner_path: NodePath) -> void:
-	source_spawner = spawner_path
-
 
 func configure_despawn_area(center: Vector2) -> void:
 	despawn_area_center = center
@@ -198,13 +166,21 @@ func configure_out_boundary(polygon: PackedVector2Array, touch_distance: float, 
 	out_boundary_polygon = polygon
 	out_touch_distance = touch_distance
 	out_avoid_distance = avoid_distance
-	# Pre-compute centroid so _pond_center_point() is O(1) for the life of this fish.
+	_boundary_segment_midpoints.clear()
+	_boundary_segment_half_lengths.clear()
 	if polygon.size() >= 3:
 		var accum: Vector2 = Vector2.ZERO
 		for pt: Vector2 in polygon:
 			accum += pt
 		_cached_pond_center = accum / float(polygon.size())
 		_pond_center_valid = true
+		# Pre-compute segment broadphase data so _nearest_point_on_out_boundary can reject
+		# distant segments before calling Geometry2D.get_closest_point_to_segment.
+		for i: int in range(polygon.size()):
+			var seg_a: Vector2 = polygon[i]
+			var seg_b: Vector2 = polygon[(i + 1) % polygon.size()]
+			_boundary_segment_midpoints.append((seg_a + seg_b) * 0.5)
+			_boundary_segment_half_lengths.append((seg_b - seg_a).length() * 0.5)
 	else:
 		_pond_center_valid = false
 
@@ -219,7 +195,6 @@ func _process(delta: float) -> void:
 		return
 
 	age_seconds += delta * maxf(age_speed_multiplier, 0.0)
-	_spawn_center_bias_remaining = maxf(0.0, _spawn_center_bias_remaining - delta)
 	energy = max(0.0, energy - hunger_rate * delta)
 
 	# Stagger expensive context updates across consecutive frames.
@@ -227,7 +202,6 @@ func _process(delta: float) -> void:
 		_update_context()
 		_update_behavior_state()
 	var accel: Vector2 = _compute_acceleration(delta)
-	accel += _compute_spawner_repulsion()
 	accel += _compute_out_boundary_avoidance()
 
 	velocity += accel * delta
@@ -244,7 +218,7 @@ func _process(delta: float) -> void:
 	is_out_of_game = not _is_inside_pond(global_position)
 	if _should_exit():
 		pending_remove = true
-		fish_exited.emit(player, get_point_value(), get_redeemable_biomass_g(), get_instance_id(), species, _successful_feed_count)
+		fish_exited.emit(get_instance_id(), species, _successful_feed_count, get_redeemable_biomass_g())
 		FishPool.release(self )
 
 
@@ -253,9 +227,6 @@ func _apply_species_defaults() -> void:
 	var species_data: Dictionary = SpeciesDB.get_species(species)
 	starting_energy = float(species_data.get("starting_energy", starting_energy))
 	energy = starting_energy
-	starting_point_value = int(species_data.get("starting_point_value", starting_point_value))
-	point_value = starting_point_value
-	weight = float(species_data.get("starting_weight", weight))
 	starting_saturation_ratio = float(species_data.get("starting_saturation_ratio", starting_saturation_ratio))
 	saturation_ratio = clampf(starting_saturation_ratio, 0.0, 1.0)
 	top_speed = float(species_data.get("top_speed", top_speed))
@@ -270,8 +241,6 @@ func _apply_species_defaults() -> void:
 	despawn_bias_start_ratio = float(species_data.get("despawn_bias_start_ratio", despawn_bias_start_ratio))
 	hunger_rate = float(species_data.get("hunger_rate", hunger_rate))
 	eat_radius = float(species_data.get("eat_radius", eat_radius))
-	spawn_center_bias_seconds = float(species_data.get("spawn_center_bias_seconds", spawn_center_bias_seconds))
-	spawn_center_bias_strength = float(species_data.get("spawn_center_bias_strength", spawn_center_bias_strength))
 	age_whiten_max_ratio = float(species_data.get("age_whiten_max_ratio", age_whiten_max_ratio))
 	flee_override_predator_ratio = float(species_data.get("flee_override_predator_ratio", flee_override_predator_ratio))
 	boid_weights = species_data.get("boid_weights", boid_weights) as Dictionary
@@ -352,16 +321,16 @@ func _update_context() -> void:
 		if global_position.distance_to(other.global_position) <= vision_radius:
 			boid_neighbors.append(other)
 
-	# Predator detection from small potential-predator list (predator species only).
+	# Predator detection: distance-gate first so can_eat_target is skipped for far predators.
 	for other: Fish in SpatialGrid.get_potential_predators():
 		if other == self or other.pending_remove or not is_instance_valid(other):
+			continue
+		var distance: float = global_position.distance_to(other.global_position)
+		if distance > predator_detection_radius:
 			continue
 		if not other.can_eat_target(self ):
 			continue
 		if other.weight < weight * maxf(flee_override_predator_ratio, 1.0):
-			continue
-		var distance: float = global_position.distance_to(other.global_position)
-		if distance > predator_detection_radius:
 			continue
 		if distance < nearest_distance:
 			nearest_distance = distance
@@ -383,8 +352,8 @@ func _update_behavior_state() -> void:
 func _compute_acceleration(_delta: float) -> Vector2:
 	if behavior_state == BehaviorState.DESCEND:
 		var descend_bias: Vector2 = _compute_guppy_style_age_despawn_bias(1.0)
-		return _compute_spawn_center_bias() + descend_bias
-	return _compute_spawn_center_bias() + _compute_despawn_bias()
+		return descend_bias
+	return _compute_despawn_bias()
 
 
 func _process_feeding(_delta: float) -> void:
@@ -408,7 +377,7 @@ func can_eat_target(target: Fish) -> bool:
 		return false
 	if is_predator and (target.species == SpeciesRegistry.PELLET or target.species == SpeciesRegistry.DETRITUS):
 		return false
-	if target.species == species and target.player == player:
+	if target.species == species:
 		return false
 	if is_predator:
 		return target.weight <= weight * 0.5
@@ -462,14 +431,8 @@ func set_weight_grams(new_weight: float) -> void:
 	_refresh_scale()
 
 
-func set_pending_feed_diagnostics(point_delta: int = 0, target: Fish = null) -> void:
-	_pending_feed_point_delta = point_delta
-	_pending_feed_target = target
-
-
 func mark_successful_feed(weight_gain_g: float = 0.0) -> void:
 	if not can_feed():
-		_pending_feed_point_delta = 0
 		_pending_feed_target = null
 		return
 	_successful_feed_count += 1
@@ -478,15 +441,9 @@ func mark_successful_feed(weight_gain_g: float = 0.0) -> void:
 	_refresh_scale()
 	saturation_ratio = clampf(saturation_ratio + 0.05, 0.0, 1.0)
 	var target_fish_id: int = 0
-	var target_species: StringName = StringName()
-	var target_player_id: int = 0
 	if _pending_feed_target != null and is_instance_valid(_pending_feed_target):
 		target_fish_id = _pending_feed_target.get_instance_id()
-		target_species = _pending_feed_target.species
-		if _pending_feed_target.species != SpeciesRegistry.PELLET and _pending_feed_target.species != SpeciesRegistry.DETRITUS:
-			target_player_id = _pending_feed_target.player
-	feed_succeeded.emit(player, species, get_instance_id(), _successful_feed_count, weight_gain_g, _pending_feed_point_delta, target_fish_id, target_species, target_player_id)
-	_pending_feed_point_delta = 0
+	feed_succeeded.emit(species, get_instance_id(), _successful_feed_count, weight_gain_g, target_fish_id)
 	_pending_feed_target = null
 
 
@@ -497,30 +454,8 @@ func get_successful_feed_count() -> int:
 func get_diagnostic_feed_target() -> Fish:
 	return null
 
-
-func add_points(points_to_add: int) -> void:
-	if points_to_add <= 0:
-		return
-	point_value = maxi(0, point_value + points_to_add)
-
-
-func get_point_value() -> int:
-	return maxi(point_value, 0)
-
-
 func get_redeemable_biomass_g() -> float:
 	return maxf(weight, 0.0)
-
-
-func _compute_spawn_center_bias() -> Vector2:
-	if _spawn_center_bias_remaining <= 0.0:
-		return Vector2.ZERO
-	var to_center: Vector2 = _pond_center_point() - global_position
-	if to_center.length_squared() <= 0.000001:
-		return Vector2.ZERO
-	var desired: Vector2 = to_center.normalized() * top_speed
-	var t: float = clampf(_spawn_center_bias_remaining / maxf(spawn_center_bias_seconds, 0.001), 0.0, 1.0)
-	return _steer_towards(desired) * (spawn_center_bias_strength * (0.35 + 0.65 * t))
 
 
 func _compute_guppy_style_age_despawn_bias(strength_multiplier: float = 1.0) -> Vector2:
@@ -598,58 +533,24 @@ func _compute_out_boundary_avoidance() -> Vector2:
 	return _steer_towards(desired) * (2.2 * scaled_strength)
 
 
-func _get_spawner_cache() -> Array[Node2D]:
-	if _cached_spawners.is_empty():
-		for node: Node in get_tree().get_nodes_in_group("fish_spawners"):
-			if node is Node2D:
-				_cached_spawners.append(node as Node2D)
-	return _cached_spawners
-
-
-func _compute_spawner_repulsion() -> Vector2:
-	var spawners: Array[Node2D] = _get_spawner_cache()
-	if spawners.is_empty():
-		return Vector2.ZERO
-
-	var total: Vector2 = Vector2.ZERO
-	for node: Node2D in spawners:
-		var spawner_node: Node2D = node
-		var radius: float = float(spawner_node.get("repel_radius"))
-		if radius <= 0.0:
-			radius = spawner_repel_radius
-
-		var to_fish: Vector2 = global_position - spawner_node.global_position
-		var distance: float = to_fish.length()
-		if distance >= radius:
-			continue
-
-		if to_fish.length_squared() <= 0.000001:
-			to_fish = Vector2.RIGHT.rotated(randf_range(-PI, PI))
-
-		var proximity: float = 1.0 - clampf(distance / max(radius, 0.0001), 0.0, 1.0)
-		var repel_multiplier: float = float(spawner_node.get("repel_force_multiplier"))
-		if repel_multiplier <= 0.0:
-			repel_multiplier = spawner_repel_force_multiplier
-
-		var desired: Vector2 = to_fish.normalized() * top_speed
-		# Push starts earlier near the zone edge and ramps up strongly deeper inside.
-		var curved_proximity: float = pow(proximity, 2.2)
-		var scaled_strength: float = 0.06 + curved_proximity * 1.34
-		total += _steer_towards(desired) * (repel_multiplier * 2.1 * scaled_strength)
-
-	return total
-
-
 func _nearest_point_on_out_boundary(point: Vector2) -> Dictionary:
-	if out_boundary_polygon.size() < 3:
+	var seg_count: int = out_boundary_polygon.size()
+	if seg_count < 3:
 		return {}
 
 	var best_distance: float = INF
 	var best_point: Vector2 = Vector2.ZERO
 	var best_tangent: Vector2 = Vector2.RIGHT
-	for i: int in range(out_boundary_polygon.size()):
+	var use_broadphase: bool = _boundary_segment_midpoints.size() == seg_count
+	for i: int in range(seg_count):
+		# Broadphase: dist(point, midpoint) - half_length is a lower bound on dist(point, segment).
+		# If the lower bound already exceeds best found, skip expensive closest-point call.
+		if use_broadphase:
+			var lower_bound: float = point.distance_to(_boundary_segment_midpoints[i]) - _boundary_segment_half_lengths[i]
+			if lower_bound > best_distance:
+				continue
 		var a: Vector2 = out_boundary_polygon[i]
-		var b: Vector2 = out_boundary_polygon[(i + 1) % out_boundary_polygon.size()]
+		var b: Vector2 = out_boundary_polygon[(i + 1) % seg_count]
 		var candidate: Vector2 = Geometry2D.get_closest_point_to_segment(point, a, b)
 		var dist: float = point.distance_to(candidate)
 		if dist < best_distance:

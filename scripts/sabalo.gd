@@ -193,8 +193,6 @@ func _process_feeding(delta: float) -> void:
 
 		target_detritus.set_detritus_value(target_detritus.detritus_value - 1)
 		detritus_units_consumed += 1
-		add_points(1)
-		set_pending_feed_diagnostics(1, target_detritus)
 		mark_successful_feed(10.0)
 
 		if target_detritus.detritus_value <= 0:

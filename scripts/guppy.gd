@@ -277,8 +277,6 @@ func _process_feeding(_delta: float) -> void:
 	if global_position.distance_to(pellet_target.global_position) > eat_radius:
 		return
 	pellets_eaten += 1
-	add_points(1)
-	set_pending_feed_diagnostics(1, pellet_target)
 	mark_successful_feed(_WEIGHT_GAIN_PER_PELLET_G)
 	energy += _ENERGY_GAIN_PER_PELLET
 	pellet_target.pending_remove = true

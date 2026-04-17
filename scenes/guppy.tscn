@@ -11,18 +11,11 @@
 script = ExtResource("2_script")
 starting_energy = 60.0
 weight = 40.0
-spawn_weight_min_g = 30.0
-top_speed = 68.4
 predator_detection_radius = 130.0
 life_span_seconds = 80.0
 age_exit_bias = 300.0
 hunger_rate = 0.1
 visual_scale_multiplier = 10.0
-boid_weights = {
-"alignment": 0.75,
-"cohesion": 0.18,
-"separation": 0.875
-}
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1301981013]
 texture = ExtResource("1_texture")

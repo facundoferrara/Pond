@@ -18,6 +18,8 @@ config/features=PackedStringArray("4.6", "GL Compatibility")
 
 SpatialGrid="*res://scripts/spatial_grid.gd"
 FishPool="*res://scripts/fish_pool.gd"
+SaveService="*res://scripts/save_service.gd"
+HabitTrackerService="*res://scripts/habit_tracker_service.gd"
 
 [display]
 

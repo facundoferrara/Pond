@@ -22,6 +22,8 @@ var _free_by_species: Dictionary = {}
 ## Hidden container keeps pooled nodes in the tree so they retain script state.
 var _pool_container: Node
 
+signal fish_released(species_name: StringName)
+
 
 func _ready() -> void:
 	_pool_container = Node.new()
@@ -65,6 +67,7 @@ func release(fish: Fish) -> void:
 	if fish == null or not is_instance_valid(fish):
 		return
 
+	var released_species: StringName = SpeciesRegistry.normalize_species(fish.species)
 	SpatialGrid.unregister_fish(fish)
 
 	# Disconnect all fish_exited listeners to prevent duplicates on re-use.
@@ -76,7 +79,8 @@ func release(fish: Fish) -> void:
 	fish.pending_remove = true
 	fish.reparent(_pool_container)
 	fish.hide()
-	_get_pool(SpeciesRegistry.normalize_species(fish.species)).append(fish)
+	_get_pool(released_species).append(fish)
+	fish_released.emit(released_species)
 
 
 ## Resolves prewarm size for each pooled species.

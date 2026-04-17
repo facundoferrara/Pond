@@ -103,14 +103,3 @@ static func get_texture_path(species_name: StringName) -> String:
 
 static func get_species_data(species_name: StringName) -> Dictionary:
 	return SpeciesDB.get_species(normalize_species(species_name))
-
-
-static func get_spawn_weight_range(species_name: StringName, fallback_weight: float) -> Vector2:
-	var species_data: Dictionary = get_species_data(species_name)
-	var min_weight: float = float(species_data.get("spawn_weight_min_g", fallback_weight))
-	var max_weight: float = float(species_data.get("spawn_weight_max_g", fallback_weight))
-	if max_weight < min_weight:
-		var temp: float = min_weight
-		min_weight = max_weight
-		max_weight = temp
-	return Vector2(min_weight, max_weight)

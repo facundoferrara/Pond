@@ -1,236 +1,199 @@
 extends Node2D
 class_name FishSpawner
 
-@export_group("Spawner Identity")
-## Owning player id for this spawner.
-@export_range(1, 2) var player_id: int = 1
+## Autonomous spawner for continuous ecosystem simulation.
+## Adaptively balances species populations toward target ratios.
+
+@export_group("Spawner Configuration")
 ## Max random offset from spawner origin for each spawn (px).
 @export var spawn_jitter_radius: float = 30.0
-## Radius around the spawner that pushes fish outward (px).
-@export var repel_radius: float = 238.0
-## Steering multiplier for spawner repulsion.
-@export var repel_force_multiplier: float = 1.8
+
+@export_group("Spawner Population Targets")
+## Target proportion of guppies among all spawned fish (0.0-1.0).
+@export_range(0.0, 1.0, 0.01) var target_guppy_ratio: float = 0.4
+## Target proportion of sabalos among all spawned fish (0.0-1.0).
+@export_range(0.0, 1.0, 0.01) var target_sabalo_ratio: float = 0.35
+## Target proportion of dientudos among all spawned fish (0.0-1.0).
+@export_range(0.0, 1.0, 0.01) var target_dientudo_ratio: float = 0.25
+
+@export_group("Spawner Balancing")
+## Deficit-correction gain for adaptive weight adjustment (0.0-2.0).
+@export_range(0.0, 2.0, 0.01) var allocation_correction_strength: float = 0.7
+## Minimum spawn weight to prevent species starvation.
+@export_range(0.0, 1.0, 0.01) var min_spawn_weight_ratio: float = 0.15
+## Seconds between population sampling for adaptation (lower = more responsive).
+@export var population_check_interval: float = 2.0
 
 @export_group("Spawner RNG")
-## Enables deterministic spawn rolls for repeatable playtests.
+## Enables deterministic spawn rolls for repeatable ecology.
 @export var use_fixed_seed: bool = false
 ## Seed used when fixed RNG mode is enabled.
 @export var fixed_seed: int = 1
 
-@export_group("Spawner Allocation")
-## Deficit-correction gain for strategy allocation weights.
-@export_range(0.0, 2.0, 0.01) var allocation_correction_strength: float = 0.7
-## Floor ratio that keeps each target species from being starved.
-@export_range(0.0, 1.0, 0.01) var min_target_retention_ratio: float = 0.2
-
-const RESOURCE_MAX: float = 100.0
-const RESOURCE_REGEN: float = 1.0 ## Resources regenerated per second.
-const GUPPY_BURST_INTERVAL: float = 0.22 ## Seconds between guppies in a burst.
-const INDIVIDUAL_COOLDOWN: float = 0.5 ## Seconds after spawning sabalo/dientudo.
-
-## Resource cost to spawn one fish of each species.
-static func species_cost(species: StringName) -> int:
-	return SpeciesRegistry.get_spawn_cost(species)
-
-var resources: float = 0.0
-var selected_species: StringName = SpeciesRegistry.DEFAULT_SPECIES
-var manual_control_enabled: bool = false
+const SPAWN_INTERVAL_GUPPY: float = 0.22 ## Seconds between guppy spawns.
+const SPAWN_INTERVAL_OTHER: float = 0.5 ## Seconds between sabalo/dientudo spawns.
 
 var _queued_species: StringName = SpeciesRegistry.DEFAULT_SPECIES
 var _spawn_ready: bool = false
 var _cooldown: float = 0.0
-var _manual_species_index: int = 0
-var strategy: Dictionary = {}
-var strategy_name: String = "random"
-var resources_spent_by_species: Dictionary = {}
-var spawns_by_species: Dictionary = {}
+var _population_check_timer: float = 0.0
+var _live_species_counts: Dictionary = {} ## Current observed populations.
+var _spawn_weights: Dictionary = {} ## Normalized weights driving next roll.
 var _rng: RandomNumberGenerator = RandomNumberGenerator.new()
 
-signal species_changed(pid: int, species: StringName)
+signal spawned_species(species: StringName)
 
 
-## Initializes deterministic or randomized spawning RNG and tracking tables.
+## Initializes RNG and spawn weight distribution.
 func _ready() -> void:
 	add_to_group("fish_spawners")
 	if use_fixed_seed:
 		_rng.seed = fixed_seed
 	else:
 		_rng.randomize()
-	_initialize_species_tracking()
+	_initialize_spawn_weights()
+	_update_population_counts()
 
 
-## Advances resource regen and queues spawns when cooldown/resources allow.
+## Advances cooldown and queues spawns; periodically re-balances population targets.
 func advance(delta: float) -> void:
-	resources = minf(RESOURCE_MAX, resources + RESOURCE_REGEN * delta)
 	_cooldown = maxf(0.0, _cooldown - delta)
-	if not manual_control_enabled and _cooldown <= 0.0 and not _spawn_ready:
+	_population_check_timer -= delta
+	
+	if _population_check_timer <= 0.0:
+		_update_population_counts()
+		_recalculate_spawn_weights()
+		_population_check_timer = population_check_interval
+	
+	if _cooldown <= 0.0 and not _spawn_ready:
 		_try_queue_spawn()
 
 
-## Reserves resources and marks a spawn payload ready for consumption.
+## Samples current live fish populations grouped by species.
+func _update_population_counts() -> void:
+	_live_species_counts.clear()
+	for species_name: StringName in SpeciesRegistry.all_species():
+		_live_species_counts[species_name] = 0
+
+	for fish: Fish in SpatialGrid.get_live_fish_snapshot():
+		if not _live_species_counts.has(fish.species):
+			continue
+		var count: int = int(_live_species_counts.get(fish.species, 0))
+		_live_species_counts[fish.species] = count + 1
+
+
+## Initializes spawn weight distribution from target ratios.
+func _initialize_spawn_weights() -> void:
+	_spawn_weights.clear()
+	_spawn_weights[SpeciesRegistry.GUPPY] = maxf(target_guppy_ratio, 0.0)
+	_spawn_weights[SpeciesRegistry.SABALO] = maxf(target_sabalo_ratio, 0.0)
+	_spawn_weights[SpeciesRegistry.DIENTUDO] = maxf(target_dientudo_ratio, 0.0)
+	var total: float = 0.0
+	for weight: Variant in _spawn_weights.values():
+		total += float(weight)
+	if total <= 0.0:
+		_spawn_weights[SpeciesRegistry.GUPPY] = 0.4
+		_spawn_weights[SpeciesRegistry.SABALO] = 0.35
+		_spawn_weights[SpeciesRegistry.DIENTUDO] = 0.25
+
+
+## Recalculates spawn weights based on current population deficit/surplus.
+func _recalculate_spawn_weights() -> void:
+	var total_alive: int = 0
+	for count: Variant in _live_species_counts.values():
+		total_alive += int(count)
+	
+	var target_ratios: Dictionary = {
+		SpeciesRegistry.GUPPY: target_guppy_ratio,
+		SpeciesRegistry.SABALO: target_sabalo_ratio,
+		SpeciesRegistry.DIENTUDO: target_dientudo_ratio
+	}
+	
+	var adjusted_weights: Dictionary = {}
+	var total_weight: float = 0.0
+	
+	for species_name: StringName in SpeciesRegistry.all_species():
+		var target_ratio: float = float(target_ratios.get(species_name, 0.0))
+		if target_ratio <= 0.0:
+			adjusted_weights[species_name] = 0.0
+			continue
+		
+		var actual_ratio: float = 0.0
+		if total_alive > 0:
+			var current_count: int = int(_live_species_counts.get(species_name, 0))
+			actual_ratio = float(current_count) / float(total_alive)
+		
+		var deficit: float = target_ratio - actual_ratio
+		var corrected_weight: float = target_ratio + deficit * allocation_correction_strength
+		var min_weight: float = target_ratio * min_spawn_weight_ratio
+		var final_weight: float = maxf(min_weight, corrected_weight)
+		
+		adjusted_weights[species_name] = maxf(0.0, final_weight)
+		total_weight += final_weight
+	
+	if total_weight <= 0.0:
+		_initialize_spawn_weights()
+		return
+	
+	# Normalize weights to sum to 1.0
+	for species_name: StringName in adjusted_weights:
+		_spawn_weights[species_name] = float(adjusted_weights[species_name]) / total_weight
+
+
+## Queues one spawn with the next adaptive species choice.
 func _try_queue_spawn() -> void:
-	var cost: int = FishSpawner.species_cost(selected_species)
-	if resources < float(cost):
-		return
-	resources -= float(cost)
-	resources_spent_by_species[selected_species] = float(resources_spent_by_species.get(selected_species, 0.0)) + float(cost)
-	_queued_species = selected_species
+	_queued_species = _roll_next_species()
 	_spawn_ready = true
-	if selected_species == SpeciesRegistry.GUPPY:
-		_cooldown = GUPPY_BURST_INTERVAL
+	if _queued_species == SpeciesRegistry.GUPPY:
+		_cooldown = SPAWN_INTERVAL_GUPPY
 	else:
-		_cooldown = INDIVIDUAL_COOLDOWN
-	if not manual_control_enabled:
-		_roll_species()
+		_cooldown = SPAWN_INTERVAL_OTHER
+	spawned_species.emit(_queued_species)
 
 
-## Chooses next species from strategy weights with deficit correction.
-func _roll_species() -> void:
+## Weighted random roll from current spawn weight distribution.
+func _roll_next_species() -> StringName:
 	var species_list: Array[StringName] = SpeciesRegistry.all_species()
 	if species_list.is_empty():
-		selected_species = SpeciesRegistry.DEFAULT_SPECIES
-		species_changed.emit(player_id, selected_species)
-		return
-	if strategy.is_empty():
-		selected_species = species_list[_rng.randi_range(0, species_list.size() - 1)]
-		species_changed.emit(player_id, selected_species)
-		return
-	var total_spent: float = 0.0
-	for sp: StringName in resources_spent_by_species:
-		total_spent += float(resources_spent_by_species.get(sp, 0.0))
-
-	var weighted_species: Array[StringName] = []
-	var weighted_values: Array[float] = []
-	var weighted_total: float = 0.0
-	for sp: StringName in strategy:
-		var target: float = maxf(0.0, float(strategy.get(sp, 0.0)))
-		if target <= 0.0:
-			continue
-		var actual: float = 0.0
-		if total_spent > 0.0:
-			actual = float(resources_spent_by_species.get(sp, 0.0)) / total_spent
-		var deficit: float = target - actual
-		var corrected: float = target + deficit * allocation_correction_strength
-		var retained_floor: float = target * min_target_retention_ratio
-		var adjusted_weight: float = maxf(retained_floor, corrected)
-		if adjusted_weight <= 0.0:
-			continue
-		weighted_species.append(sp)
-		weighted_values.append(adjusted_weight)
-		weighted_total += adjusted_weight
-
-	if weighted_species.is_empty() or weighted_total <= 0.0:
-		selected_species = species_list[_rng.randi_range(0, species_list.size() - 1)]
-		species_changed.emit(player_id, selected_species)
-		return
-
-	var roll: float = _rng.randf_range(0.0, weighted_total)
+		return SpeciesRegistry.DEFAULT_SPECIES
+	
+	var roll: float = _rng.randf_range(0.0, 1.0)
 	var accum: float = 0.0
-	selected_species = weighted_species[weighted_species.size() - 1]
-	for i: int in weighted_species.size():
-		accum += weighted_values[i]
+	var selected: StringName = species_list[0]
+	
+	for species_name: StringName in species_list:
+		accum += float(_spawn_weights.get(species_name, 0.0))
 		if roll <= accum:
-			selected_species = weighted_species[i]
+			selected = species_name
 			break
-	species_changed.emit(player_id, selected_species)
+	
+	return selected
 
 
-## Applies strategy weights used by _roll_species().
-func configure_strategy(strategy_label: String, weights: Dictionary) -> void:
-	manual_control_enabled = false
-	strategy_name = strategy_label
-	strategy = weights.duplicate()
-	_roll_species()
-
-
-## Enables local manual species control and disables weighted auto-rolling.
-func set_manual_control_enabled(enabled: bool) -> void:
-	manual_control_enabled = enabled
-	if not manual_control_enabled:
-		return
-	strategy_name = "manual"
-	strategy.clear()
-	var species_list: Array[StringName] = SpeciesRegistry.all_species()
-	if species_list.is_empty():
-		selected_species = SpeciesRegistry.DEFAULT_SPECIES
-		_manual_species_index = 0
-		species_changed.emit(player_id, selected_species)
-		return
-	_manual_species_index = species_list.find(selected_species)
-	if _manual_species_index < 0:
-		_manual_species_index = 0
-	selected_species = species_list[_manual_species_index]
-	species_changed.emit(player_id, selected_species)
-
-
-## Advances selected species index by one step in manual mode.
-func cycle_selected_species(direction: int) -> void:
-	if not manual_control_enabled:
-		return
-	var species_list: Array[StringName] = SpeciesRegistry.all_species()
-	if species_list.is_empty():
-		return
-	var step: int = 1 if direction >= 0 else -1
-	_manual_species_index = posmod(_manual_species_index + step, species_list.size())
-	selected_species = species_list[_manual_species_index]
-	species_changed.emit(player_id, selected_species)
-
-
-## Attempts one spawn from the currently selected manual species.
-func request_spawn_accept() -> void:
-	if not manual_control_enabled:
-		return
-	if _spawn_ready or _cooldown > 0.0:
-		return
-	_try_queue_spawn()
-
-
-## Returns true when a spawn payload has been queued this frame window.
+## Returns true when a spawn payload is ready for consumption.
 func can_spawn(_current_count: int) -> bool:
 	return _spawn_ready
-
-
-## Adds resources instantly (used by detritus refund mechanics).
-func add_resource(amount: float) -> void:
-	if amount <= 0.0:
-		return
-	resources = minf(RESOURCE_MAX, resources + amount)
 
 
 ## Returns a queued spawn request payload consumed by Zoo.
 func consume_spawn_request() -> Dictionary:
 	_spawn_ready = false
-	spawns_by_species[_queued_species] = int(spawns_by_species.get(_queued_species, 0)) + 1
 	var jitter: Vector2 = Vector2(
 		_rng.randf_range(-spawn_jitter_radius, spawn_jitter_radius),
 		_rng.randf_range(-spawn_jitter_radius, spawn_jitter_radius)
 	)
 	return {
 		"species": _queued_species,
-		"player": player_id,
-		"origin": global_position + jitter,
-		"spawner_path": get_path()
+		"origin": global_position + jitter
 	}
 
 
-## Clears runtime spawn state between matches.
+## Resets spawner state for continuous operation.
 func reset() -> void:
-	resources = 0.0
-	_queued_species = SpeciesRegistry.DEFAULT_SPECIES
-	_spawn_ready = false
 	_cooldown = 0.0
-	_initialize_species_tracking()
-	selected_species = SpeciesRegistry.DEFAULT_SPECIES
-	if manual_control_enabled:
-		_manual_species_index = 0
-		species_changed.emit(player_id, selected_species)
-	else:
-		_roll_species()
-
-
-func _initialize_species_tracking() -> void:
-	resources_spent_by_species.clear()
-	spawns_by_species.clear()
-	for species_name: StringName in SpeciesRegistry.all_species():
-		resources_spent_by_species[species_name] = 0.0
-		spawns_by_species[species_name] = 0
+	_spawn_ready = false
+	_queued_species = SpeciesRegistry.DEFAULT_SPECIES
+	_population_check_timer = 0.0
+	_initialize_spawn_weights()
+	_update_population_counts()
+	_recalculate_spawn_weights()

@@ -12,8 +12,6 @@ script = ExtResource("2_script")
 species = &"sabalo"
 starting_energy = 32.0
 weight = 225.0
-spawn_weight_min_g = 200.0
-spawn_weight_max_g = 250.0
 top_speed = 80.0
 separation_radius = 26.0
 max_force = 168.0
@@ -22,17 +20,13 @@ age_exit_bias = 400.0
 hunger_rate = 0.72
 eat_radius = 0.0
 visual_scale_multiplier = 8.0
-boid_weights = {
-"alignment": 0.0,
-"cohesion": 0.0,
-"separation": 0.0
-}
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=274733233]
+scale = Vector2(0.63261014, 0.63261014)
 texture = ExtResource("1_texture")
 
 [node name="mouth" type="Area2D" parent="." unique_id=434063964]
-position = Vector2(0, -187)
+position = Vector2(0, -123)
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="mouth" unique_id=1242636492]
 position = Vector2(0, 12.000002)
@@ -40,6 +34,7 @@ scale = Vector2(2.8400002, 2.8400002)
 shape = SubResource("CircleShape2D_6hqxd")
 
 [node name="body" type="Area2D" parent="." unique_id=411855950]
+scale = Vector2(0.6735655, 0.6735655)
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="body" unique_id=1595566752]
 scale = Vector2(4.6399994, 4.6399994)

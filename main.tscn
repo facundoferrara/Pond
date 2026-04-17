@@ -5,4 +5,3 @@
 [node name="Main" type="Node2D" unique_id=199634151]
 
 [node name="Zoo" parent="." unique_id=1656853360 instance=ExtResource("1_zoo")]
-round_robin_laps = 5

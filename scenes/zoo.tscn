@@ -3,27 +3,31 @@
 [ext_resource type="Script" uid="uid://c6k0x603p13xb" path="res://scripts/zoo.gd" id="1_script"]
 [ext_resource type="Texture2D" uid="uid://njv834nobfac" path="res://assets/fondo.png" id="2_background"]
 [ext_resource type="Script" uid="uid://dgefae383sc5m" path="res://scripts/fish_spawner.gd" id="3_spawner"]
+[ext_resource type="Script" path="res://scripts/productivity_hud.gd" id="4_hud"]
 
 [node name="Zoo" type="Node2D" unique_id=1134105347]
 script = ExtResource("1_script")
+profile_force_fish_count_enabled = true
+profile_target_fish_count = 150
+profile_fill_max_spawns_per_frame = 40
 
 [node name="Background" type="TextureRect" parent="." unique_id=1280707652]
+z_index = -300
+z_as_relative = false
 offset_right = 1920.0
 offset_bottom = 1080.0
-z_as_relative = false
-z_index = -300
 mouse_filter = 2
 texture = ExtResource("2_background")
 
 [node name="Pond" type="Node2D" parent="." unique_id=109309175]
 
 [node name="PondShape" type="Polygon2D" parent="." unique_id=1836942769]
+z_index = -250
+z_as_relative = false
 position = Vector2(178.45639, -52.415062)
 scale = Vector2(1.2196581, 1.6094773)
-z_as_relative = false
-z_index = -250
 color = Color(0.6, 0.79, 0.86, 0.11)
-polygon = PackedVector2Array(120.9713, 248.16447, 211.9804, 113.959404, 211.9804, 69.8457, 144.74843, -9.683231, 154.58727, -43.234497, 189.02315, -59.38881, 249.69588, -41.99186, 357.10303, 82.89342, 429.2544, 118.30864, 557.979, 149.99594, 704.74146, 151.85991, 843.3049, 120.79392, 924.47516, 83.51473, 1014.66437, -37.642624, 1072.0574, -61.25277, 1118.7919, -50.069016, 1127.8108, -9.683231, 1071.2375, 67.981735, 1069.5978, 119.551285, 1151.5879, 251.27107, 1191.7631, 361.2447, 1199.1422, 455.06396, 1187.6636, 537.0782, 1139.2894, 583.6772, 1054.8395, 630.89746, 928.57465, 658.8569, 709.6608, 693.65076, 710.4808, 786.2274, 575.19696, 785.6061, 575.19696, 693.65076, 343.16467, 660.0995, 211.9804, 630.89746, 124.2509, 579.32794, 84.0757, 524.03046, 74.23688, 443.2589, 85.7155, 356.89545)
+polygon = PackedVector2Array(120.9713, 248.16447, 211.9804, 113.959404, 273.47302, 90.34925, 357.10303, 82.89342, 429.2544, 118.30864, 557.979, 149.99594, 704.74146, 151.85991, 843.3049, 120.79392, 924.47516, 83.51473, 1010.5649, 82.89342, 1069.5978, 119.551285, 1151.5879, 251.27107, 1191.7631, 361.2447, 1199.1422, 455.06396, 1187.6636, 537.0782, 1139.2894, 583.6772, 1054.8395, 630.89746, 928.57465, 658.8569, 709.6608, 693.65076, 710.4808, 786.2274, 575.19696, 785.6061, 575.19696, 693.65076, 343.16467, 660.0995, 211.9804, 630.89746, 124.2509, 579.32794, 84.0757, 524.03046, 74.23688, 443.2589, 85.7155, 356.89545)
 
 [node name="OutBoundary" type="Line2D" parent="." unique_id=1410733489]
 visible = false
@@ -31,7 +35,7 @@ closed = true
 width = 2.0
 default_color = Color(0.95, 0.2, 0.2, 0.45)
 
-[node name="OutBoundaryDebug" type="Line2D" parent="."]
+[node name="OutBoundaryDebug" type="Line2D" parent="." unique_id=794028902]
 visible = false
 closed = true
 width = 2.0
@@ -45,74 +49,168 @@ scale = Vector2(0.13607597, 0.22018327)
 color = Color(0.95, 0.34, 0.2, 0.18)
 polygon = PackedVector2Array(16, 176, 1280, 176, 1280, 612, 16, 612)
 
-[node name="SpawnerP1" type="Node2D" parent="." unique_id=1332999764]
-position = Vector2(422, -96)
+[node name="Spawner1" type="Node2D" parent="." unique_id=1332999764]
+position = Vector2(531, 176)
 script = ExtResource("3_spawner")
 spawn_jitter_radius = 38.0
 
-[node name="SpawnerP2" type="Node2D" parent="." unique_id=896194607]
-position = Vector2(1489, -98)
+[node name="Spawner2" type="Node2D" parent="." unique_id=896194607]
+position = Vector2(1385, 172)
 script = ExtResource("3_spawner")
-player_id = 2
 spawn_jitter_radius = 32.0
 
 [node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=506612631]
 
-[node name="ScoreP1" type="Label" parent="CanvasLayer" unique_id=521335280]
-offset_left = 16.0
-offset_top = 10.0
-offset_right = 340.0
-offset_bottom = 38.0
-text = "P1 outflow: 0g"
+[node name="ProductivityModules" type="Control" parent="CanvasLayer" unique_id=1932900950]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("4_hud")
 
-[node name="ScoreP2" type="Label" parent="CanvasLayer" unique_id=1649777984]
-offset_left = 16.0
-offset_top = 34.0
-offset_right = 340.0
-offset_bottom = 62.0
-text = "P2 outflow: 0g"
+[node name="HabitTrackerPanel" type="Panel" parent="CanvasLayer/ProductivityModules" unique_id=527288073]
+anchors_preset = 0
+offset_left = 22.0
+offset_top = 22.0
+offset_right = 292.0
+offset_bottom = 150.0
 
-[node name="FishCount" type="Label" parent="CanvasLayer" unique_id=778368903]
-offset_left = 16.0
-offset_top = 58.0
-offset_right = 340.0
-offset_bottom = 86.0
-text = "Fish: 0 / 100"
+[node name="Title" type="Label" parent="CanvasLayer/ProductivityModules/HabitTrackerPanel" unique_id=825114001]
+offset_left = 14.0
+offset_top = 12.0
+offset_right = 256.0
+offset_bottom = 40.0
+text = "Habit Tracker"
 
-[node name="ModeOverlay" type="Panel" parent="CanvasLayer"]
+[node name="Body" type="Label" parent="CanvasLayer/ProductivityModules/HabitTrackerPanel" unique_id=1980064123]
+offset_left = 14.0
+offset_top = 44.0
+offset_right = 254.0
+offset_bottom = 114.0
+autowrap_mode = 3
+text = "Placeholder module\nDaily habits and streaks"
+
+[node name="ClockPanel" type="Panel" parent="CanvasLayer/ProductivityModules" unique_id=571451435]
+anchors_preset = 5
 anchor_left = 0.5
-anchor_top = 0.0
 anchor_right = 0.5
-anchor_bottom = 0.0
-offset_left = -300.0
-offset_top = 16.0
-offset_right = 300.0
-offset_bottom = 512.0
+offset_left = -160.0
+offset_top = 22.0
+offset_right = 160.0
+offset_bottom = 110.0
 
-[node name="BtnRoundRobin" type="Button" parent="CanvasLayer/ModeOverlay"]
-offset_left = 80.0
-offset_top = 120.0
-offset_right = 520.0
-offset_bottom = 192.0
-text = "1  -  Round Robin  (45 games)"
+[node name="Title" type="Label" parent="CanvasLayer/ProductivityModules/ClockPanel" unique_id=1971446889]
+offset_left = 14.0
+offset_top = 10.0
+offset_right = 305.0
+offset_bottom = 32.0
+text = "Clock"
 
-[node name="BtnFocusedSuite" type="Button" parent="CanvasLayer/ModeOverlay"]
-offset_left = 80.0
-offset_top = 216.0
-offset_right = 520.0
-offset_bottom = 288.0
-text = "2  -  Focused Suite  (9 games)"
+[node name="ClockValue" type="Label" parent="CanvasLayer/ProductivityModules/ClockPanel" unique_id=2099929527]
+offset_left = 14.0
+offset_top = 35.0
+offset_right = 303.0
+offset_bottom = 77.0
+horizontal_alignment = 1
+text = "--:--:--"
 
-[node name="BtnTwoPlayers" type="Button" parent="CanvasLayer/ModeOverlay"]
-offset_left = 80.0
-offset_top = 312.0
-offset_right = 520.0
-offset_bottom = 384.0
-text = "3  -  2 Players"
+[node name="TimerPanel" type="Panel" parent="CanvasLayer/ProductivityModules" unique_id=1730163118]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -292.0
+offset_top = 22.0
+offset_right = -22.0
+offset_bottom = 150.0
 
-[node name="BtnCampaign" type="Button" parent="CanvasLayer/ModeOverlay"]
-offset_left = 80.0
-offset_top = 408.0
-offset_right = 520.0
-offset_bottom = 480.0
-text = "4  -  1 Player Campaign"
+[node name="Title" type="Label" parent="CanvasLayer/ProductivityModules/TimerPanel" unique_id=1869203209]
+offset_left = 14.0
+offset_top = 12.0
+offset_right = 256.0
+offset_bottom = 40.0
+text = "Timer"
+
+[node name="TimerValue" type="Label" parent="CanvasLayer/ProductivityModules/TimerPanel" unique_id=813099015]
+offset_left = 14.0
+offset_top = 42.0
+offset_right = 256.0
+offset_bottom = 70.0
+horizontal_alignment = 1
+text = "25:00 placeholder"
+
+[node name="MusicPanel" type="Panel" parent="CanvasLayer/ProductivityModules" unique_id=891300290]
+anchors_preset = 3
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 22.0
+offset_top = -150.0
+offset_right = 292.0
+offset_bottom = -22.0
+
+[node name="Title" type="Label" parent="CanvasLayer/ProductivityModules/MusicPanel" unique_id=212366998]
+offset_left = 14.0
+offset_top = 12.0
+offset_right = 256.0
+offset_bottom = 40.0
+text = "Music"
+
+[node name="Body" type="Label" parent="CanvasLayer/ProductivityModules/MusicPanel" unique_id=1749534623]
+offset_left = 14.0
+offset_top = 44.0
+offset_right = 254.0
+offset_bottom = 112.0
+autowrap_mode = 3
+text = "OST player placeholder"
+
+[node name="ShopPanel" type="Panel" parent="CanvasLayer/ProductivityModules" unique_id=271314767]
+anchors_preset = 9
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -292.0
+offset_top = -150.0
+offset_right = -22.0
+offset_bottom = -22.0
+
+[node name="Title" type="Label" parent="CanvasLayer/ProductivityModules/ShopPanel" unique_id=889579430]
+offset_left = 14.0
+offset_top = 12.0
+offset_right = 256.0
+offset_bottom = 40.0
+text = "Shop"
+
+[node name="Body" type="Label" parent="CanvasLayer/ProductivityModules/ShopPanel" unique_id=534812425]
+offset_left = 14.0
+offset_top = 44.0
+offset_right = 254.0
+offset_bottom = 112.0
+autowrap_mode = 3
+text = "Cosmetics placeholder"
+
+[node name="PondManagementPanel" type="Panel" parent="CanvasLayer/ProductivityModules" unique_id=713847943]
+anchors_preset = 10
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -190.0
+offset_top = -130.0
+offset_right = 190.0
+offset_bottom = -22.0
+
+[node name="Title" type="Label" parent="CanvasLayer/ProductivityModules/PondManagementPanel" unique_id=1330717274]
+offset_left = 14.0
+offset_top = 10.0
+offset_right = 362.0
+offset_bottom = 36.0
+text = "Pond Management"
+
+[node name="Body" type="Label" parent="CanvasLayer/ProductivityModules/PondManagementPanel" unique_id=1506687164]
+offset_left = 14.0
+offset_top = 38.0
+offset_right = 360.0
+offset_bottom = 102.0
+autowrap_mode = 3
+text = "Spawner and ecosystem controls placeholder"

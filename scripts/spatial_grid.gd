@@ -8,9 +8,12 @@ extends Node
 @export_group("Spatial Grid")
 ## Grid cell size in pixels. Keep near common vision radii for fewer queried cells.
 @export var cell_size: float = 120.0
+## Rebuild full grid every N frames. 1 = every frame; 2 = every other frame (1-frame-old positions, fine for ambient sim).
+@export_range(1, 4, 1) var rebuild_interval: int = 2
 
 ## Vector2i cell key -> Array of Fish in that cell.
 var _cells: Dictionary = {}
+var _rebuild_frame_counter: int = 0
 
 ## All live registered fish. Used for predator scan (kept small via register/unregister).
 var _all_fish: Array[Fish] = []
@@ -22,6 +25,9 @@ var _potential_predators: Array[Fish] = []
 
 ## Called by Zoo._process() once per frame, BEFORE any Fish._process() runs.
 func rebuild() -> void:
+	_rebuild_frame_counter += 1
+	if _rebuild_frame_counter % maxi(rebuild_interval, 1) != 0:
+		return
 	_cells.clear()
 	for fish: Fish in _all_fish:
 		if not is_instance_valid(fish) or fish.pending_remove:
@@ -69,6 +75,16 @@ func query_neighbors_by_species_set(pos: Vector2, radius: float, species_set: Ar
 ## Returns the live predator fish list.
 func get_potential_predators() -> Array[Fish]:
 	return _potential_predators
+
+
+## Returns a filtered snapshot of currently live fish.
+func get_live_fish_snapshot() -> Array[Fish]:
+	var result: Array[Fish] = []
+	for fish: Fish in _all_fish:
+		if not is_instance_valid(fish) or fish.pending_remove:
+			continue
+		result.append(fish)
+	return result
 
 
 ## Called when a fish enters the pond and starts its active life.
